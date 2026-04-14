@@ -1,0 +1,32 @@
+services:
+  pipeline_backend:
+    build:
+      context: ..
+      dockerfile: pipeline_service/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@host.docker.internal:5672/%2F
+      PIPELINE_QUEUE_ENABLED: "true"
+      PIPELINE_QUEUE_NAME: pipeline_jobs
+      PIPELINE_API_PREFIX: /pipeline/v1
+      PIPELINE_ENABLE_DOCS: "false"
+      PIPELINE_PUBLIC_BASE_URL: http://34.106.160.70:8100
+      PIPELINE_CALLBACK_URL: ""
+      STORE_DB: "true"
+      MONGODB_URI: "mongodb+srv://bundlebox:pass1234@cluster0.mrj0bks.mongodb.net/?appName=Cluster0"
+      MONGO_DB_NAME: bundlebox
+      MONGO_RESULTS_COLLECTION: pipeline_results
+      UPLOAD_DIR: /app/data/uploads
+      OUTPUT_DIR: /app/data/outputs
+    volumes:
+      - app-data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    gpus: all
+    ports:
+      - "8100:8100"
+
+volumes:
+  app-data:

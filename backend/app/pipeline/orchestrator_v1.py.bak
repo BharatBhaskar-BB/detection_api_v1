@@ -1,0 +1,812 @@
+"""Pipeline orchestrator — coordinates all 10 steps, pushes WebSocket progress."""
+
+import asyncio
+import json
+import re
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import cv2
+import numpy as np
+from loguru import logger
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.config import get_settings
+from app.database import async_session
+from app.models.models import InventoryItem, PipelineCost, Scan, ScanResult, Video
+from app.models.schemas import WSComplete, WSError, WSItemAdded, WSProgress
+from app.utils.video import extract_frames
+from app.utils.debug_dump import (
+    dump_frames, dump_scenes, dump_priming, dump_detections,
+    dump_tracks, dump_inventory, dump_key_frames,
+)
+
+settings = get_settings()
+
+# GPT-4o pricing (per 1K tokens, as of 2025)
+LLM_COST_PER_1K = {"input": 0.0025, "output": 0.01}  # $2.50/$10 per 1M tokens
+
+
+def _bbox_iou(a: list[float], b: list[float]) -> float:
+    """Compute IoU between two [x1, y1, x2, y2] bboxes."""
+    x1 = max(a[0], b[0])
+    y1 = max(a[1], b[1])
+    x2 = min(a[2], b[2])
+    y2 = min(a[3], b[3])
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    area_a = max(0, a[2] - a[0]) * max(0, a[3] - a[1])
+    area_b = max(0, b[2] - b[0]) * max(0, b[3] - b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _bbox_overlap(a: list[float], b: list[float]) -> float:
+    """Containment-aware overlap: max(IoU, intersection/min_area).
+
+    Catches both normal overlap AND small-box-inside-large-box duplicates.
+    """
+    x1 = max(a[0], b[0])
+    y1 = max(a[1], b[1])
+    x2 = min(a[2], b[2])
+    y2 = min(a[3], b[3])
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    area_a = max(0, a[2] - a[0]) * max(0, a[3] - a[1])
+    area_b = max(0, b[2] - b[0]) * max(0, b[3] - b[1])
+    union = area_a + area_b - inter
+    iou = inter / union if union > 0 else 0.0
+    min_area = min(area_a, area_b)
+    containment = inter / min_area if min_area > 0 else 0.0
+    return max(iou, containment)
+
+
+def _nms_count(bboxes: list[list[float]], iou_thresh: float = 0.5) -> int:
+    """Count unique objects after greedy NMS — suppress overlapping boxes.
+
+    Uses containment-aware overlap: max(IoU, intersection/min_area).
+    This catches both normal overlap AND small-box-inside-large-box duplicates.
+    """
+    if len(bboxes) <= 1:
+        return len(bboxes)
+    kept: list[list[float]] = []
+    # Sort by area descending (prefer larger boxes)
+    sorted_bbs = sorted(bboxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
+    for bb in sorted_bbs:
+        if all(_bbox_overlap(bb, k) < iou_thresh for k in kept):
+            kept.append(bb)
+    return len(kept)
+
+
+def _compute_llm_cost(tokens_in: int, tokens_out: int) -> float:
+    return (tokens_in / 1000) * LLM_COST_PER_1K["input"] + (tokens_out / 1000) * LLM_COST_PER_1K["output"]
+
+
+def _count_unique_world_positions(
+    all_detections: list[list[dict]],
+    frames: list[np.ndarray],
+) -> dict[str, int]:
+    """Count unique objects by mapping detections to world (frame-0) coordinates
+    via cumulative camera-motion compensation, then clustering spatially.
+
+    This catches cases that max_per_frame misses — e.g. camera panning across
+    4 identical chairs where at most 3 are visible in any single frame.
+    """
+    from app.pipeline.tracker import estimate_camera_motion
+
+    if not frames or len(frames) != len(all_detections) or len(frames) < 2:
+        return {}
+
+    h, w = frames[0].shape[:2]
+    img_diag = float(np.sqrt(h ** 2 + w ** 2))
+
+    # Build cumulative forward affine C[k]: maps frame-0 coords → frame-k coords
+    # inv(C[k]) maps frame-k coords → frame-0 (world) coords
+    cum_fwd = np.eye(3, dtype=np.float64)
+    inv_per_frame: list[np.ndarray] = [np.eye(3, dtype=np.float64)]  # frame 0
+
+    for fi in range(1, len(frames)):
+        affine = estimate_camera_motion(frames[fi - 1], frames[fi])
+        if affine is not None:
+            M = np.eye(3, dtype=np.float64)
+            M[:2, :] = affine.astype(np.float64)
+            cum_fwd = M @ cum_fwd
+        try:
+            inv_per_frame.append(np.linalg.inv(cum_fwd))
+        except np.linalg.LinAlgError:
+            inv_per_frame.append(inv_per_frame[-1])
+
+    # Map every detection to world coordinates
+    world_pts: dict[str, list[tuple[float, float]]] = {}
+
+    for fi, dets in enumerate(all_detections):
+        inv_M = inv_per_frame[fi]
+        for det in dets:
+            bbox = det.get("bbox", [0, 0, 0, 0])
+            bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            if bw < 15 or bh < 15:
+                continue  # skip edge slivers / noise
+            if det.get("confidence", 0) < 0.30:
+                continue  # skip low-confidence noise
+            cx = (bbox[0] + bbox[2]) / 2.0
+            cy = (bbox[1] + bbox[3]) / 2.0
+            pt = inv_M @ np.array([cx, cy, 1.0])
+            world_pts.setdefault(det["label"], []).append((float(pt[0]), float(pt[1])))
+
+    # Greedy centroid-based clustering per label
+    # Use wider radius to absorb CMC drift on longer videos
+    n_frames = len(frames)
+    base_pct = 0.10  # 10% of diagonal baseline
+    drift_extra = 0.005 * max(0, n_frames - 5)  # +0.5% per frame beyond 5
+    cluster_radius = (base_pct + drift_extra) * img_diag
+    result: dict[str, int] = {}
+
+    for label, pts in world_pts.items():
+        clusters: list[tuple[float, float, int]] = []  # (avg_x, avg_y, count)
+        for wx, wy in pts:
+            merged = False
+            for ci, (ax, ay, cnt) in enumerate(clusters):
+                if np.sqrt((wx - ax) ** 2 + (wy - ay) ** 2) < cluster_radius:
+                    clusters[ci] = (
+                        (ax * cnt + wx) / (cnt + 1),
+                        (ay * cnt + wy) / (cnt + 1),
+                        cnt + 1,
+                    )
+                    merged = True
+                    break
+            if not merged:
+                clusters.append((wx, wy, 1))
+        result[label] = len(clusters)
+        if clusters:
+            logger.info(
+                f"World-coord count [{label}]: {len(clusters)} unique positions "
+                f"from {len(pts)} detections (radius={cluster_radius:.0f}px)"
+            )
+
+    return result
+
+
+def _normalize_label(label: str) -> str:
+    """Strip parenthesized suffixes and normalize for matching."""
+    cleaned = re.sub(r'\s*\(.*?\)', '', label).strip().lower()
+    # Singularize simple trailing 's'
+    if cleaned.endswith("s") and not cleaned.endswith("ss"):
+        cleaned = cleaned[:-1]
+    return cleaned
+
+
+def _save_item_crops(
+    scan_id: str,
+    all_detections: list[list[dict]],
+    all_frames: list[np.ndarray],
+    video_paths: list[str],
+    stride: int,
+) -> dict[str, str]:
+    """Save best-confidence crop per label using high-res frames.
+
+    Returns {normalized_label: relative_path}.
+    """
+    crops_dir = settings.UPLOAD_DIR / "crops" / scan_id
+    crops_dir.mkdir(parents=True, exist_ok=True)
+
+    detect_h, detect_w = all_frames[0].shape[:2] if all_frames else (360, 480)
+
+    # Find best detection per *normalized* label (highest confidence)
+    best: dict[str, tuple[float, int, list[float]]] = {}
+    for frame_idx, dets in enumerate(all_detections):
+        for det in dets:
+            norm = _normalize_label(det["label"])
+            conf = det.get("confidence", 0)
+            if norm not in best or conf > best[norm][0]:
+                best[norm] = (conf, frame_idx, det.get("bbox", []))
+
+    # Build a map: global_frame_idx → (video_path, local_frame_number)
+    # so we can re-read specific frames at high resolution
+    frame_map: dict[int, tuple[str, int]] = {}
+    offset = 0
+    for vpath in video_paths:
+        cap = cv2.VideoCapture(vpath)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        count = len(range(0, total, stride))
+        for local_i in range(count):
+            frame_map[offset + local_i] = (vpath, local_i * stride)
+        offset += count
+
+    CROP_MAX_WIDTH = 1280  # high-res for crops
+
+    result: dict[str, str] = {}
+    for label, (conf, frame_idx, bbox) in best.items():
+        if not bbox or frame_idx >= len(all_frames):
+            continue
+
+        # Try to read the frame at higher resolution from original video
+        frame = None
+        if frame_idx in frame_map:
+            vpath, frame_no = frame_map[frame_idx]
+            cap = cv2.VideoCapture(vpath)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
+            ret, raw = cap.read()
+            cap.release()
+            if ret and raw is not None:
+                oh, ow = raw.shape[:2]
+                if ow > CROP_MAX_WIDTH:
+                    scale = CROP_MAX_WIDTH / ow
+                    raw = cv2.resize(raw, (CROP_MAX_WIDTH, int(oh * scale)))
+                frame = raw
+
+        # Scale bbox from detection resolution to crop frame resolution
+        if frame is not None:
+            fh, fw = frame.shape[:2]
+            sx, sy = fw / detect_w, fh / detect_h
+        else:
+            # Fallback to the detection-resolution frame
+            frame = all_frames[frame_idx]
+            sx, sy = 1.0, 1.0
+
+        h, w = frame.shape[:2]
+        x1 = int(bbox[0] * sx)
+        y1 = int(bbox[1] * sy)
+        x2 = int(bbox[2] * sx)
+        y2 = int(bbox[3] * sy)
+
+        # Add 10% padding
+        pad_w = int((x2 - x1) * 0.1)
+        pad_h = int((y2 - y1) * 0.1)
+        x1, y1 = max(0, x1 - pad_w), max(0, y1 - pad_h)
+        x2, y2 = min(w, x2 + pad_w), min(h, y2 + pad_h)
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            continue
+
+        # Sanitize label for filename
+        safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", label)[:50]
+        filename = f"{safe_name}.jpg"
+        cv2.imwrite(str(crops_dir / filename), crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        result[label] = f"crops/{scan_id}/{filename}"
+
+    logger.info(f"Saved {len(result)} item crops → {crops_dir}")
+    return result
+
+
+def _save_evidence_frames(
+    scan_id: str,
+    key_frame_indices: list[int],
+    all_frames: list[np.ndarray],
+    all_detections: list[list[dict]],
+) -> list[dict]:
+    """Save clean key frames + per-item anchor metadata for UI spotlight mode."""
+    evidence_dir = settings.UPLOAD_DIR / "evidence" / scan_id
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+
+    evidence_frames: list[dict] = []
+
+    for order, frame_idx in enumerate(key_frame_indices):
+        if frame_idx >= len(all_frames):
+            continue
+
+        frame = all_frames[frame_idx]
+        h, w = frame.shape[:2]
+        if h == 0 or w == 0:
+            continue
+
+        filename = f"keyframe_{order:02d}_f{frame_idx:04d}.jpg"
+        full_path = evidence_dir / filename
+        cv2.imwrite(str(full_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+
+        dets = all_detections[frame_idx] if frame_idx < len(all_detections) else []
+        by_label: dict[str, list[dict]] = {}
+        for det in dets:
+            norm = _normalize_label(det.get("label", ""))
+            if not norm:
+                continue
+            by_label.setdefault(norm, []).append(det)
+
+        frame_items: list[dict] = []
+        for label in sorted(by_label.keys()):
+            label_dets = by_label[label]
+            bboxes = [d.get("bbox", [0, 0, 0, 0]) for d in label_dets]
+            unique_count = _nms_count(bboxes, iou_thresh=0.65)
+
+            anchors: list[dict] = []
+            sorted_dets = sorted(label_dets, key=lambda d: d.get("confidence", 0.0), reverse=True)
+            for det in sorted_dets[: min(3, len(sorted_dets))]:
+                bb = det.get("bbox", [0, 0, 0, 0])
+                if len(bb) != 4:
+                    continue
+                x = ((bb[0] + bb[2]) / 2.0) / w
+                y = ((bb[1] + bb[3]) / 2.0) / h
+                anchors.append({"x": float(max(0.0, min(1.0, x))), "y": float(max(0.0, min(1.0, y)))})
+
+            frame_items.append({
+                "name": label,
+                "count": int(max(1, unique_count)),
+                "anchors": anchors,
+            })
+
+        evidence_frames.append({
+            "frame_index": frame_idx,
+            "image_path": f"evidence/{scan_id}/{filename}",
+            "items": frame_items,
+        })
+
+    manifest_path = evidence_dir / "manifest.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump({"frames": evidence_frames}, f, indent=2)
+
+    logger.info(f"Saved {len(evidence_frames)} evidence key frames → {evidence_dir}")
+    return evidence_frames
+
+
+# Step definitions for progress tracking
+STEPS = [
+    ("video_processing", "Video Processing", 0.0, 0.08),
+    ("scene_detection", "Scene Detection", 0.08, 0.15),
+    ("llm_priming", "AI Priming", 0.15, 0.22),
+    ("gdino_detection", "Detecting Items", 0.22, 0.70),
+    ("tracking", "Tracking & Counting", 0.70, 0.85),
+    ("verification", "Verification", 0.85, 1.0),
+]
+
+
+async def _broadcast(scan_id: str, data: dict) -> None:
+    """Send WebSocket message to all listeners for this scan."""
+    from app.api.websocket import manager
+    await manager.broadcast(scan_id, data)
+
+
+async def _update_scan_progress(
+    db: AsyncSession, scan_id: str, step: str, progress: float, message: str
+) -> None:
+    """Update scan record with current progress."""
+    result = await db.execute(select(Scan).where(Scan.id == scan_id))
+    scan = result.scalar_one_or_none()
+    if scan:
+        scan.status = "processing"
+        scan.pipeline_step = step
+        scan.progress = progress
+        scan.progress_message = message
+        await db.commit()
+
+
+async def _run_pipeline(scan_id: str) -> None:
+    """Execute the full 10-step Smart Priming pipeline."""
+    start_time = time.time()
+
+    async with async_session() as db:
+        # Load scan with videos
+        result = await db.execute(
+            select(Scan).where(Scan.id == scan_id).options(selectinload(Scan.videos))
+        )
+        scan = result.scalar_one_or_none()
+        if not scan:
+            logger.error(f"Scan {scan_id} not found")
+            return
+
+        scan.status = "processing"
+        await db.commit()
+
+        try:
+            # ════════════════════════════════════════════════════════
+            # STEP 1-2: Video Processing + Frame Extraction
+            # ════════════════════════════════════════════════════════
+            step_name, step_label, p_start, p_end = STEPS[0]
+            await _update_scan_progress(db, scan_id, step_name, p_start, "Extracting frames…")
+            await _broadcast(scan_id, WSProgress(
+                scan_id=scan_id, step=step_name, step_number=1,
+                progress=p_start, message="Extracting frames from video…",
+            ).model_dump())
+
+            all_frames = []
+            video_paths: list[str] = []
+            from app.services.storage import get_storage
+            storage = get_storage()
+
+            for video in scan.videos:
+                video_path = await storage.get_video_path(video.storage_path)
+                video_paths.append(video_path)
+                frames = extract_frames(video_path, stride=settings.VIDEO_STRIDE)
+                all_frames.extend(frames)
+
+            frame_count = len(all_frames)
+            await _update_scan_progress(db, scan_id, step_name, p_end, f"Extracted {frame_count} frames")
+            await _broadcast(scan_id, WSProgress(
+                scan_id=scan_id, step=step_name, step_number=1,
+                progress=p_end, message=f"Extracted {frame_count} frames",
+            ).model_dump())
+
+            # Debug dump: frames
+            await asyncio.to_thread(dump_frames, scan_id, all_frames)
+
+            # ════════════════════════════════════════════════════════
+            # STEP 2: Scene Detection
+            # ════════════════════════════════════════════════════════
+            step_name, step_label, p_start, p_end = STEPS[1]
+            await _update_scan_progress(db, scan_id, step_name, p_start, "Detecting scenes…")
+            await _broadcast(scan_id, WSProgress(
+                scan_id=scan_id, step=step_name, step_number=2,
+                progress=p_start, message="Detecting distinct scenes…",
+            ).model_dump())
+
+            from app.pipeline.scene_detector import SceneDetector
+            scene_detector = SceneDetector()
+            scenes = await asyncio.to_thread(scene_detector.detect, all_frames)
+
+            scene_count = len(scenes)
+            await _update_scan_progress(db, scan_id, step_name, p_end, f"Found {scene_count} scenes")
+            await _broadcast(scan_id, WSProgress(
+                scan_id=scan_id, step=step_name, step_number=2,
+                progress=p_end, message=f"Found {scene_count} distinct scenes",
+            ).model_dump())
+
+            # Debug dump: scenes
+            await asyncio.to_thread(dump_scenes, scan_id, scenes)
+
+            # ════════════════════════════════════════════════════════
+            # STEP 3: LLM Checklist Priming
+            # ════════════════════════════════════════════════════════
+            step_name, step_label, p_start, p_end = STEPS[2]
+            await _update_scan_progress(db, scan_id, step_name, p_start, "AI analyzing scenes…")
+            await _broadcast(scan_id, WSProgress(
+                scan_id=scan_id, step=step_name, step_number=3,
+                progress=p_start, message="AI analyzing scenes for items…",
+            ).model_dump())
+
+            from app.pipeline.gemini_primer import GeminiPrimer
+            primer = GeminiPrimer()
+            prompts, new_items, primer_usage, count_hints = await primer.prime(scenes)
+
+            # Save pipeline cost
+            primer_cost = _compute_llm_cost(primer_usage["tokens_in"], primer_usage["tokens_out"])
+            db.add(PipelineCost(
+                scan_id=scan_id, step="llm_priming", provider="gemini",
+                model=primer_usage["model"], tokens_in=primer_usage["tokens_in"],
+                tokens_out=primer_usage["tokens_out"],
+                duration_s=time.time() - start_time, cost_usd=primer_cost,
+                extra_data={"scene_count": scene_count, "prompt_count": len(prompts)},
+            ))
+
+            # Save raw priming results
+            for item_name in prompts:
+                db.add(ScanResult(
+                    scan_id=scan_id, step="llm_priming", label=item_name,
+                    confidence=1.0, extra_data={"source": "confirmed"},
+                ))
+            for new_item in new_items:
+                db.add(ScanResult(
+                    scan_id=scan_id, step="llm_priming", label=new_item["name"],
+                    frame_index=new_item.get("frame", 0),
+                    confidence=1.0, extra_data={"source": "new"},
+                ))
+            await db.flush()
+
+            prompt_count = len(prompts)
+            await _update_scan_progress(
+                db, scan_id, step_name, p_end, f"Identified {prompt_count} potential items"
+            )
+            await _broadcast(scan_id, WSProgress(
+                scan_id=scan_id, step=step_name, step_number=3,
+                progress=p_end, message=f"Identified {prompt_count} potential items",
+                items_found=prompts,
+            ).model_dump())
+
+            # Debug dump: priming
+            await asyncio.to_thread(dump_priming, scan_id, prompts, new_items, primer_usage, count_hints, primer.raw_response)
+
+            # ════════════════════════════════════════════════════════
+            # STEP 4: Object Detection (GDINO or SAM3)
+            # ════════════════════════════════════════════════════════
+            step_name, step_label, p_start, p_end = STEPS[3]
+            use_sam3 = getattr(scan, "detector_type", "gdino").lower() == "sam3"
+            detector_name = "SAM3" if use_sam3 else "GDINO"
+
+            if use_sam3:
+                from app.pipeline.sam3_detector import SAM3Detector
+                detector = SAM3Detector(
+                    settings.SAM3_WEIGHTS_PATH,
+                    settings.PROMPT_BATCH_SIZE,
+                    settings.SAM3_IMGSZ,
+                )
+            else:
+                from app.pipeline.gdino_detector import GDINODetector
+                detector = GDINODetector(settings.GDINO_WEIGHTS_PATH, settings.PROMPT_BATCH_SIZE)
+
+            items_found_so_far: list[str] = []
+            all_detections: list[list[dict]] = []
+            detect_start = time.time()
+            logger.info(f"Using detector: {detector_name}")
+
+            for i, frame in enumerate(all_frames):
+                progress = p_start + (p_end - p_start) * (i / max(frame_count, 1))
+                # Run detector in thread to avoid blocking the event loop
+                dets = await asyncio.to_thread(detector.detect_frame, frame, prompts)
+                all_detections.append(dets)
+
+                # Save raw detection results
+                for det in dets:
+                    db.add(ScanResult(
+                        scan_id=scan_id, step=detector_name.lower(), frame_index=i,
+                        label=det["label"], confidence=det.get("confidence", 0.0),
+                        bbox=det.get("bbox"),
+                    ))
+
+                # Track newly discovered items for live feed
+                for det in dets:
+                    if det["label"] not in items_found_so_far:
+                        items_found_so_far.append(det["label"])
+                        await _broadcast(scan_id, WSItemAdded(
+                            scan_id=scan_id, item_name=det["label"],
+                        ).model_dump())
+
+                # Broadcast progress every ~10 frames
+                if i % 10 == 0 or i == frame_count - 1:
+                    elapsed = time.time() - start_time
+                    eta = (elapsed / max(i + 1, 1)) * (frame_count - i - 1) if i < frame_count - 1 else 0
+                    await _update_scan_progress(
+                        db, scan_id, step_name, progress,
+                        f"Detecting: frame {i+1}/{frame_count}",
+                    )
+                    await _broadcast(scan_id, WSProgress(
+                        scan_id=scan_id, step=step_name, step_number=4,
+                        progress=progress,
+                        message=f"Detecting objects ({detector_name}): frame {i+1}/{frame_count}",
+                        items_found=items_found_so_far,
+                        elapsed_s=elapsed, eta_s=eta,
+                    ).model_dump())
+
+            # Save detection inference cost (local GPU — no $ cost but track time)
+            detect_duration = time.time() - detect_start
+            total_dets = sum(len(d) for d in all_detections)
+            db.add(PipelineCost(
+                scan_id=scan_id, step=f"{detector_name.lower()}_inference", provider="local_gpu",
+                model=detector_name.lower(), tokens_in=0, tokens_out=0,
+                duration_s=detect_duration, cost_usd=0.0,
+                extra_data={
+                    "detector": detector_name,
+                    "frames": frame_count,
+                    "total_detections": total_dets,
+                    "prompts": len(prompts),
+                },
+            ))
+            await db.flush()
+
+            # Debug dump: detections (annotated frames + JSON)
+            await asyncio.to_thread(dump_detections, scan_id, all_frames, all_detections)
+
+            # Cross-label NMS: suppress duplicate detections where
+            # different prompts (e.g. "table" vs "round table") fire on
+            # the exact same object.  Keep the more specific label
+            # (longer name) or higher confidence when IoU > 0.70.
+            _CROSS_NMS_THRESH = 0.70
+            before_total = sum(len(fd) for fd in all_detections)
+            for fi, frame_dets in enumerate(all_detections):
+                if len(frame_dets) < 2:
+                    continue
+                # Sort: longer (more specific) label first, then by confidence
+                frame_dets.sort(key=lambda d: (len(d["label"]), d.get("confidence", 0)), reverse=True)
+                keep: list[dict] = []
+                for det in frame_dets:
+                    bb = det.get("bbox", [0, 0, 0, 0])
+                    if all(_bbox_overlap(bb, k.get("bbox", [0, 0, 0, 0])) < _CROSS_NMS_THRESH for k in keep):
+                        keep.append(det)
+                all_detections[fi] = keep
+            after_total = sum(len(fd) for fd in all_detections)
+            logger.info("Cross-label NMS: %d → %d detections (removed %d duplicates)",
+                        before_total, after_total, before_total - after_total)
+
+            # ════════════════════════════════════════════════════════
+            # STEP 5-7: Tracking + Merging + Re-ID
+            # ════════════════════════════════════════════════════════
+            step_name, step_label, p_start, p_end = STEPS[4]
+            await _update_scan_progress(db, scan_id, step_name, p_start, "Tracking objects…")
+            await _broadcast(scan_id, WSProgress(
+                scan_id=scan_id, step=step_name, step_number=5,
+                progress=p_start, message="Tracking objects across frames…",
+            ).model_dump())
+
+            from app.pipeline.postprocess import (
+                select_key_frames,
+            )
+
+            tracking_start = time.time()
+
+            # Gallery-based tracker — BoT-SORT-style with CLIP gallery.
+            # Replaces: ByteTracker + merge_fragmented_tracks + clip_visual_reid.
+            # Retired tracks stay in a gallery forever; unmatched detections
+            # search the gallery by CLIP similarity before creating new tracks.
+            # Count = number of unique track IDs. No stitching needed.
+            from app.pipeline.gallery_tracker import GalleryTracker
+            tracker = GalleryTracker()
+            tracks = await asyncio.to_thread(tracker.track, all_detections, all_frames)
+            tracker_name = "gallery"
+
+            # Debug dump: tracks (single stage — no separate raw/merged/reid)
+            await asyncio.to_thread(dump_tracks, scan_id, tracks, "raw")
+            await asyncio.to_thread(dump_tracks, scan_id, tracks, "reid")
+
+            # Save tracking results
+            for track in tracks:
+                db.add(ScanResult(
+                    scan_id=scan_id, step="tracking",
+                    label=track.label,
+                    track_id=track.id,
+                    confidence=track.confidence,
+                    extra_data={"frame_start": track.first_frame, "frame_end": track.last_frame, "count": track.frame_count},
+                ))
+            db.add(PipelineCost(
+                scan_id=scan_id, step="tracking", provider="local_gpu",
+                model=f"{tracker_name}+clip", tokens_in=0, tokens_out=0,
+                duration_s=time.time() - tracking_start, cost_usd=0.0,
+                extra_data={"tracks": len(tracks), "detector": detector_name},
+            ))
+            await db.flush()
+
+            # ════════════════════════════════════════════════════════
+            # STEP 8: Inventory Assembly
+            # ════════════════════════════════════════════════════════
+            from app.pipeline.inventory import assemble_inventory
+
+            # Compute max simultaneous detections per label across all frames
+            # Apply per-label NMS to collapse overlapping bboxes for same object
+            max_per_frame: dict[str, int] = {}
+            for frame_dets in all_detections:
+                # Group detections by label
+                by_label: dict[str, list[list[float]]] = {}
+                for det in frame_dets:
+                    by_label.setdefault(det["label"], []).append(det.get("bbox", [0, 0, 0, 0]))
+                # NMS per label: collapse overlapping boxes (IoU > 0.5)
+                for lbl, bboxes in by_label.items():
+                    unique = _nms_count(bboxes, iou_thresh=0.65)
+                    max_per_frame[lbl] = max(max_per_frame.get(lbl, 0), unique)
+
+            inventory_data = assemble_inventory(
+                tracks, new_items, count_hints, max_per_frame,
+            )
+
+            # Save best crop per item label (high-res from original video)
+            item_crops = await asyncio.to_thread(
+                _save_item_crops, scan_id, all_detections, all_frames,
+                video_paths, settings.VIDEO_STRIDE,
+            )
+
+            # Debug dump: assembled inventory
+            await asyncio.to_thread(dump_inventory, scan_id, inventory_data, "assembled")
+
+            # Broadcast each item
+            for item in inventory_data:
+                await _broadcast(scan_id, WSItemAdded(
+                    scan_id=scan_id, item_name=item["name"],
+                    room_name=item.get("room_name", ""),
+                ).model_dump())
+
+            await _update_scan_progress(db, scan_id, step_name, p_end, "Tracking complete")
+
+            # ════════════════════════════════════════════════════════
+            # STEP 9-10: Key Frames + LLM Verification
+            # ════════════════════════════════════════════════════════
+            step_name, step_label, p_start, p_end = STEPS[5]
+            await _update_scan_progress(db, scan_id, step_name, p_start, "Verifying inventory…")
+            await _broadcast(scan_id, WSProgress(
+                scan_id=scan_id, step=step_name, step_number=6,
+                progress=p_start, message="Verifying inventory count…",
+            ).model_dump())
+
+            key_frame_indices = select_key_frames(tracks, frame_count, frames=all_frames)
+            key_frames_np = [all_frames[i] for i in key_frame_indices if i < len(all_frames)]
+
+            # Debug dump: key frames
+            await asyncio.to_thread(dump_key_frames, scan_id, all_frames, key_frame_indices)
+
+            # Save evidence key frames + metadata for frontend annotations
+            await asyncio.to_thread(
+                _save_evidence_frames,
+                scan_id,
+                key_frame_indices,
+                all_frames,
+                all_detections,
+            )
+
+            from app.pipeline.gemini_verifier import GeminiVerifier
+            verifier = GeminiVerifier()
+            verify_start = time.time()
+            verified_inventory, verifier_usage = await verifier.verify(inventory_data, key_frames_np)
+
+            # Save verification cost
+            verify_cost = _compute_llm_cost(verifier_usage["tokens_in"], verifier_usage["tokens_out"])
+            db.add(PipelineCost(
+                scan_id=scan_id, step="verification", provider="gemini",
+                model=verifier_usage["model"], tokens_in=verifier_usage["tokens_in"],
+                tokens_out=verifier_usage["tokens_out"],
+                duration_s=time.time() - verify_start, cost_usd=verify_cost,
+                extra_data={"key_frames": len(key_frames_np), "draft_items": len(inventory_data)},
+            ))
+
+            # Save verified results
+            for item in verified_inventory:
+                db.add(ScanResult(
+                    scan_id=scan_id, step="verification",
+                    label=item.get("name", ""),
+                    confidence=item.get("confidence", 1.0),
+                    extra_data={"count": item.get("count", 1), "room": item.get("room_name", "")},
+                ))
+            await db.flush()
+
+            # Debug dump: verified inventory
+            await asyncio.to_thread(dump_inventory, scan_id, verified_inventory, "verified")
+
+            # ════════════════════════════════════════════════════════
+            # Save final inventory to database
+            # ════════════════════════════════════════════════════════
+            for item in verified_inventory:
+                db.add(InventoryItem(
+                    scan_id=scan_id,
+                    name=item.get("name", ""),
+                    count=item.get("count", 1),
+                    room_name=item.get("room_name", ""),
+                    source=item.get("source", "detected"),
+                    is_new=item.get("is_new", False),
+                    confidence=item.get("confidence", 1.0),
+                    frame_index=item.get("frame_index"),
+                    image_path=item_crops.get(_normalize_label(item.get("name", ""))),
+                ))
+
+            # Compute total cost from all pipeline_costs rows
+            elapsed = time.time() - start_time
+            total_cost = primer_cost + verify_cost  # LLM costs; GPU costs are 0 for local
+
+            scan.status = "completed"
+            scan.progress = 1.0
+            scan.progress_message = "Scan complete!"
+            scan.pipeline_step = "complete"
+            scan.total_items = len(verified_inventory)
+            scan.processing_time_s = elapsed
+            scan.cost_usd = total_cost
+            scan.completed_at = datetime.now(timezone.utc)
+            await db.commit()
+
+            await _broadcast(scan_id, WSComplete(
+                scan_id=scan_id,
+                total_items=len(verified_inventory),
+                total_rooms=scan.total_rooms,
+                processing_time_s=elapsed,
+                cost_usd=total_cost,
+            ).model_dump())
+
+            # Send push notification
+            from app.services.push import send_push_to_scan_owner
+            await send_push_to_scan_owner(
+                db, scan_id,
+                title="Scan Complete!",
+                body=f"Found {len(verified_inventory)} items in {elapsed:.1f}s",
+                url=f"/scans/{scan_id}/inventory",
+            )
+
+            logger.info(f"Pipeline complete: scan={scan_id}, detector={detector_name}, items={len(verified_inventory)}, time={elapsed:.1f}s")
+
+        except Exception as e:
+            logger.exception(f"Pipeline failed: scan={scan_id}")
+            scan.status = "failed"
+            scan.progress_message = str(e)[:200]
+            await db.commit()
+
+            await _broadcast(scan_id, WSError(
+                scan_id=scan_id, message=f"Processing failed: {str(e)[:200]}",
+            ).model_dump())
+
+            # Send push notification for failure
+            from app.services.push import send_push_to_scan_owner
+            await send_push_to_scan_owner(
+                db, scan_id,
+                title="Scan Failed",
+                body=f"Error: {str(e)[:100]}",
+                url=f"/scans/{scan_id}",
+            )
+
+
+async def trigger_pipeline(scan_id: str) -> None:
+    """Launch the pipeline as a background task."""
+    # For production: use Celery task instead
+    # For now: run as asyncio background task
+    asyncio.create_task(_run_pipeline(scan_id))
+    logger.info(f"Pipeline triggered for scan={scan_id}")

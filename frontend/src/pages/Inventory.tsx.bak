@@ -1,0 +1,464 @@
+/* ── Inventory Page — edit detected items ── */
+
+import { useEffect, useState, useMemo } from "react";
+import { useParams, useNavigate } from "react-router-dom";
+import { api } from "../services/api";
+import type { EvidenceFrame, InventoryItem } from "../types";
+
+const SMART_EVIDENCE_PREF_KEY = "bb_show_smart_evidence";
+
+export default function InventoryPage() {
+  const { id: scanId } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+
+  const [items, setItems] = useState<InventoryItem[]>([]);
+  const [evidenceFrames, setEvidenceFrames] = useState<EvidenceFrame[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [activeRoom, setActiveRoom] = useState<string>("All");
+  const [showAdd, setShowAdd] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newRoom, setNewRoom] = useState("");
+  const [newCount, setNewCount] = useState(1);
+  const [previewItem, setPreviewItem] = useState<InventoryItem | null>(null);
+  const [spotlightItem, setSpotlightItem] = useState<string>("all");
+  const [showSmartEvidence, setShowSmartEvidence] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SMART_EVIDENCE_PREF_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    if (!scanId) return;
+    api.inventory
+      .get(scanId)
+      .then((inv) => {
+        setItems(inv.items);
+        setEvidenceFrames(inv.evidence_frames || []);
+      })
+      .finally(() => setLoading(false));
+  }, [scanId]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        SMART_EVIDENCE_PREF_KEY,
+        showSmartEvidence ? "1" : "0",
+      );
+    } catch {
+      // Ignore storage errors (private mode/quota) and keep in-memory behavior.
+    }
+  }, [showSmartEvidence]);
+
+  const evidenceLabels = useMemo(() => {
+    const allowed = new Set(items.map((i) => i.name.toLowerCase()));
+    const names = new Set<string>();
+    for (const frame of evidenceFrames) {
+      for (const item of frame.items) {
+        if (allowed.has(item.name.toLowerCase())) names.add(item.name);
+      }
+    }
+    return ["all", ...Array.from(names).sort()];
+  }, [evidenceFrames, items]);
+
+  const rooms = useMemo(() => {
+    const set = new Set(items.map((i) => i.room_name));
+    return ["All", ...Array.from(set).sort()];
+  }, [items]);
+
+  const filtered =
+    activeRoom === "All"
+      ? items
+      : items.filter((i) => i.room_name === activeRoom);
+
+  const updateCount = async (item: InventoryItem, delta: number) => {
+    const next = Math.max(0, item.count + delta);
+    if (next === 0) return deleteItem(item);
+    if (!scanId) return;
+    const updated = await api.inventory.updateItem(scanId, item.id, {
+      count: next,
+    });
+    setItems((prev) => prev.map((i) => (i.id === item.id ? updated : i)));
+  };
+
+  const deleteItem = async (item: InventoryItem) => {
+    if (!scanId) return;
+    await api.inventory.deleteItem(scanId, item.id);
+    setItems((prev) => prev.filter((i) => i.id !== item.id));
+  };
+
+  const addItem = async () => {
+    if (!scanId || !newName.trim() || !newRoom.trim()) return;
+    const created = await api.inventory.addItem(scanId, {
+      name: newName.trim(),
+      count: newCount,
+      room_name: newRoom.trim(),
+    });
+    setItems((prev) => [...prev, created]);
+    setNewName("");
+    setNewRoom("");
+    setNewCount(1);
+    setShowAdd(false);
+  };
+
+  const handleSave = async () => {
+    if (!scanId) return;
+    setSaving(true);
+    try {
+      await api.inventory.save(scanId);
+      navigate(`/scans/${scanId}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!scanId) return null;
+
+  return (
+    <div className="px-5 py-5">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-5">
+        <div>
+          <h2 className="text-xl font-bold">Inventory</h2>
+          <p className="text-xs text-gray-400 mt-0.5">
+            {items.length} item{items.length !== 1 ? "s" : ""} ·{" "}
+            {items.reduce((s, i) => s + i.count, 0)} total
+          </p>
+        </div>
+        <button
+          onClick={() => setShowAdd(true)}
+          className="w-9 h-9 flex items-center justify-center bg-gray-900 text-white rounded-xl text-lg"
+        >
+          +
+        </button>
+      </div>
+
+      {/* Room filter tabs */}
+      <div className="flex gap-2 overflow-x-auto pb-3 mb-4 -mx-5 px-5 no-scrollbar">
+        {rooms.map((r) => (
+          <button
+            key={r}
+            onClick={() => setActiveRoom(r)}
+            className={`whitespace-nowrap px-3.5 py-2 rounded-full text-xs font-bold transition-all ${
+              activeRoom === r
+                ? "bg-gray-900 text-white"
+                : "bg-gray-100 text-gray-500"
+            }`}
+          >
+            {r}
+          </button>
+        ))}
+      </div>
+
+      {/* Smart evidence toggle */}
+      {evidenceFrames.length > 0 && (
+        <div className="mb-4 flex items-center justify-between rounded-xl border border-gray-200 bg-white px-3.5 py-2.5">
+          <div>
+            <p className="text-xs font-semibold text-gray-800">
+              Smart Evidence
+            </p>
+            <p className="text-[11px] text-gray-400">
+              {evidenceFrames.length} key frame
+              {evidenceFrames.length !== 1 ? "s" : ""}
+            </p>
+          </div>
+          <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+            <span className="text-[11px] text-gray-500">
+              {showSmartEvidence ? "On" : "Off"}
+            </span>
+            <input
+              type="checkbox"
+              checked={showSmartEvidence}
+              onChange={(e) => setShowSmartEvidence(e.target.checked)}
+              className="h-4 w-4 rounded border-gray-300 text-gray-900 focus:ring-gray-900"
+            />
+          </label>
+        </div>
+      )}
+
+      {/* Evidence frames (context-first annotations) */}
+      {evidenceFrames.length > 0 && showSmartEvidence && (
+        <section className="mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-bold">Smart Evidence</h3>
+            <span className="text-[11px] text-gray-400">
+              {evidenceFrames.length} key frame
+              {evidenceFrames.length !== 1 ? "s" : ""}
+            </span>
+          </div>
+
+          <div className="flex gap-2 overflow-x-auto pb-2 mb-3 no-scrollbar">
+            {evidenceLabels.map((label) => (
+              <button
+                key={label}
+                onClick={() => setSpotlightItem(label)}
+                className={`whitespace-nowrap px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-colors ${
+                  spotlightItem === label
+                    ? "bg-gray-900 text-white border-gray-900"
+                    : "bg-white text-gray-600 border-gray-200"
+                }`}
+              >
+                {label === "all" ? "All items" : label}
+              </button>
+            ))}
+          </div>
+
+          <div className="space-y-4">
+            {evidenceFrames.map((frame) => {
+              const visibleItems =
+                spotlightItem === "all"
+                  ? frame.items.filter((it) =>
+                      items.some(
+                        (inv) =>
+                          inv.name.toLowerCase() === it.name.toLowerCase(),
+                      ),
+                    )
+                  : frame.items.filter((it) => it.name === spotlightItem);
+
+              const numberedItems = visibleItems.map((it, idx) => ({
+                ...it,
+                marker: idx + 1,
+              }));
+
+              return (
+                <div
+                  key={`${frame.frame_index}-${frame.image_url}`}
+                  className="bg-white border border-gray-100 rounded-2xl overflow-hidden"
+                >
+                  <div className="relative bg-black">
+                    <img
+                      src={frame.image_url}
+                      alt={`Evidence frame ${frame.frame_index}`}
+                      className="w-full h-auto object-contain"
+                    />
+
+                    {numberedItems.flatMap((item) =>
+                      item.anchors.map((a, i) => (
+                        <div
+                          key={`${item.name}-${i}`}
+                          className="absolute -translate-x-1/2 -translate-y-1/2"
+                          style={{
+                            left: `${a.x * 100}%`,
+                            top: `${a.y * 100}%`,
+                          }}
+                        >
+                          <div className="w-5 h-5 rounded-full bg-white text-gray-900 border border-gray-900 text-[10px] font-bold flex items-center justify-center shadow">
+                            {item.marker}
+                          </div>
+                        </div>
+                      )),
+                    )}
+                  </div>
+
+                  <div className="p-3 border-t border-gray-100">
+                    {numberedItems.length === 0 ? (
+                      <p className="text-xs text-gray-400">
+                        This item is not visible in this key frame.
+                      </p>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {numberedItems.map((item) => (
+                          <span
+                            key={item.name}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs bg-gray-50 border border-gray-200"
+                          >
+                            <span className="w-4 h-4 rounded-full bg-white border border-gray-900 text-[10px] font-bold flex items-center justify-center">
+                              {item.marker}
+                            </span>
+                            {item.name}
+                            {item.count > 1 && (
+                              <span className="text-[10px] text-gray-500">
+                                ×{item.count}
+                              </span>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* Items list */}
+      {loading ? (
+        <p className="text-sm text-gray-300 text-center py-10">Loading…</p>
+      ) : filtered.length === 0 ? (
+        <p className="text-sm text-gray-300 text-center py-10">
+          No items in this room
+        </p>
+      ) : (
+        <div className="space-y-2.5">
+          {filtered.map((item) => (
+            <div
+              key={item.id}
+              className="flex items-center gap-3 p-3.5 bg-white border border-gray-100 rounded-2xl"
+            >
+              {/* Thumbnail */}
+              {item.image_url ? (
+                <button
+                  onClick={() => setPreviewItem(item)}
+                  className="w-11 h-11 rounded-xl overflow-hidden flex-shrink-0 bg-gray-100"
+                >
+                  <img
+                    src={item.image_url}
+                    alt={item.name}
+                    className="w-full h-full object-cover"
+                  />
+                </button>
+              ) : (
+                <div className="w-11 h-11 rounded-xl bg-gray-100 flex items-center justify-center flex-shrink-0">
+                  <span className="text-gray-300 text-lg">📦</span>
+                </div>
+              )}
+
+              {/* Info */}
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className="font-semibold text-sm truncate">{item.name}</p>
+                  {item.is_new && (
+                    <span className="text-[9px] font-bold px-1.5 py-0.5 bg-red-100 text-brand-red rounded">
+                      NEW
+                    </span>
+                  )}
+                </div>
+                <p className="text-[10px] text-gray-400 mt-0.5">
+                  {item.room_name} · {item.source}
+                </p>
+              </div>
+
+              {/* Counter */}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => updateCount(item, -1)}
+                  className="w-7 h-7 flex items-center justify-center bg-gray-100 rounded-lg text-xs font-bold"
+                >
+                  −
+                </button>
+                <span className="text-sm font-bold w-6 text-center">
+                  {item.count}
+                </span>
+                <button
+                  onClick={() => updateCount(item, 1)}
+                  className="w-7 h-7 flex items-center justify-center bg-gray-100 rounded-lg text-xs font-bold"
+                >
+                  +
+                </button>
+              </div>
+
+              {/* Delete */}
+              <button
+                onClick={() => deleteItem(item)}
+                className="text-gray-300 hover:text-red-500 text-xs ml-1 transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Add item modal */}
+      {showAdd && (
+        <div className="fixed inset-0 bg-black/40 flex items-end justify-center z-50">
+          <div className="bg-white w-full max-w-[430px] rounded-t-3xl p-6">
+            <h3 className="text-base font-bold mb-4">Add Item</h3>
+
+            <input
+              type="text"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="Item name"
+              className="w-full px-3.5 py-3 border-[1.5px] border-gray-200 rounded-xl text-sm mb-3 focus:outline-none focus:border-gray-900"
+              autoFocus
+            />
+            <input
+              type="text"
+              value={newRoom}
+              onChange={(e) => setNewRoom(e.target.value)}
+              placeholder="Room name"
+              className="w-full px-3.5 py-3 border-[1.5px] border-gray-200 rounded-xl text-sm mb-3 focus:outline-none focus:border-gray-900"
+            />
+            <div className="flex items-center gap-3 mb-4">
+              <label className="text-xs font-semibold text-gray-500">
+                Count:
+              </label>
+              <button
+                onClick={() => setNewCount(Math.max(1, newCount - 1))}
+                className="w-8 h-8 bg-gray-100 rounded-lg text-sm font-bold"
+              >
+                −
+              </button>
+              <span className="font-bold">{newCount}</span>
+              <button
+                onClick={() => setNewCount(newCount + 1)}
+                className="w-8 h-8 bg-gray-100 rounded-lg text-sm font-bold"
+              >
+                +
+              </button>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowAdd(false)}
+                className="flex-1 py-3 border border-gray-200 rounded-xl text-sm font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={addItem}
+                disabled={!newName.trim() || !newRoom.trim()}
+                className="flex-1 py-3 bg-gray-900 text-white rounded-xl text-sm font-semibold disabled:opacity-50"
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Save button */}
+      {items.length > 0 && (
+        <div className="mt-6">
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="w-full py-4 bg-gray-900 text-white rounded-2xl font-bold text-sm hover:bg-black transition-colors disabled:opacity-50"
+          >
+            {saving ? "Saving…" : "Save Inventory"}
+          </button>
+        </div>
+      )}
+
+      {/* Image preview modal */}
+      {previewItem?.image_url && (
+        <div
+          className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-6"
+          onClick={() => setPreviewItem(null)}
+        >
+          <div
+            className="bg-white rounded-2xl overflow-hidden max-w-sm w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <img
+              src={previewItem.image_url}
+              alt={previewItem.name}
+              className="w-full object-contain max-h-72"
+            />
+            <div className="p-4 text-center">
+              <p className="font-bold text-sm">{previewItem.name}</p>
+              <p className="text-xs text-gray-400 mt-0.5">
+                {previewItem.room_name} · ×{previewItem.count}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

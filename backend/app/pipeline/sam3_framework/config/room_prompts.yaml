@@ -1,0 +1,143 @@
+# Room-type prompt presets for inventory detection.
+# Each room type maps to a curated list of objects likely found there.
+# These are used once per room type — no LLM call needed at runtime.
+
+room_types:
+  living_room:
+    label: "Living Room"
+    prompts:
+      - sofa or couch
+      - armchair or seating chair
+      - coffee table or table surface
+      - tv or television
+      - tv stand or media console
+      - storage cabinet or shelf
+      - lamp or lighting
+      - decor items or wall art
+      - rug or carpet
+      - electronics device
+      - plant or indoor plant
+      - small personal items
+
+  kitchen:
+    label: "Kitchen"
+    prompts:
+      - refrigerator or fridge
+      - cooking appliance or oven or stove
+      - microwave or small appliance
+      - dishwasher
+      - kitchen cabinet or storage
+      - countertop items
+      - utensils or cookware
+      - sink area
+      - table or dining surface
+      - chair or seating
+      - food containers or jars
+      - small kitchen items
+
+  bedroom:
+    label: "Bedroom"
+    prompts:
+      - bed or mattress
+      - side table or nightstand
+      - wardrobe or closet
+      - dresser or storage furniture
+      - chair or seating
+      - lamp or lighting
+      - mirror
+      - decor items
+      - electronics device
+      - personal belongings
+      - bags or suitcase
+      - small items on surfaces
+
+  bathroom:
+    label: "Bathroom"
+    prompts:
+      - sink or wash basin
+      - toilet
+      - shower area or bathtub
+      - bathroom cabinet or storage
+      - mirror
+      - toiletries or small items
+      - towels or fabric items
+      - cleaning supplies
+      - decor items
+
+  office:
+    label: "Office / Study"
+    prompts:
+      - desk or table surface
+      - office chair
+      - laptop or computer
+      - monitor or screen
+      - keyboard or mouse
+      - printer or electronics
+      - books or documents
+      - storage shelves or cabinet
+      - lamp or lighting
+      - bags or personal items
+      - small desk items
+
+  dining_room:
+    label: "Dining Room"
+    prompts:
+      - dining table
+      - dining chair
+      - storage cabinet or sideboard
+      - decor items
+      - lighting fixture or chandelier
+      - tableware items
+      - small items on table
+      - rug or carpet
+
+  utility_room:
+    label: "Utility / Laundry"
+    prompts:
+      - washing machine
+      - dryer
+      - laundry basket or clothes
+      - cleaning supplies
+      - ironing board
+      - storage cabinet
+      - small utility items
+
+  garage:
+    label: "Garage / Storage"
+    prompts:
+      - storage boxes or containers
+      - tools or equipment
+      - bicycle or large item
+      - shelves or storage racks
+      - sports equipment
+      - appliance or machine
+      - miscellaneous items
+
+  custom:
+    label: "Custom (All Objects)"
+    prompts: [] # Falls back to DEFAULT_PROMPTS
+
+# Normalization hints — map raw detection labels to canonical categories
+normalization_hints:
+  chair: seating
+  armchair: seating
+  sofa: seating
+
+  desk: table_surface
+  coffee table: table_surface
+  dining table: table_surface
+  table: table_surface
+
+  cabinet: storage_furniture
+  wardrobe: storage_furniture
+  dresser: storage_furniture
+
+  tv: electronics
+  laptop: electronics
+  computer: electronics
+
+  lamp: lighting
+  floor lamp: lighting
+
+  plant: decor
+  vase: decor
