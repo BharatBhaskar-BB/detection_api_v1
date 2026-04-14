@@ -6,7 +6,7 @@ from pathlib import Path
 import requests
 
 
-BASE_URL = "http://136.110.86.112:8100/pipeline/v1"
+BASE_URL = "http://136.110.86.112:8100/api/detection/v1"
 SCAN_ID = "scan_multi_1"
 JOB_ID = SCAN_ID  # same socket/job stream for all rooms in this scan
 REQUEST_USER_ID = "user_1"

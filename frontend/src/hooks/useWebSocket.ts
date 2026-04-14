@@ -33,7 +33,7 @@ export function useWebSocket({
       params.set("token", token);
     }
     const query = params.toString();
-    const url = `${protocol}//${host}/pipeline/v1/ws/${scanId}${query ? `?${query}` : ""}`;
+    const url = `${protocol}//${host}/api/detection/v1/ws/${scanId}${query ? `?${query}` : ""}`;
 
     const ws = new WebSocket(url);
     wsRef.current = ws;

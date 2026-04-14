@@ -6,7 +6,7 @@ from pathlib import Path
 
 from datetime import datetime
 start_time = datetime.now()
-base_url = "http://34.106.160.70:8100/pipeline/v1"
+base_url = "http://34.106.160.70:8100/api/detection/v1"
 scan_id = "scan_multi_3"
 job_id = scan_id
 room_id = "room_1"

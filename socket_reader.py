@@ -7,7 +7,7 @@ from urllib.parse import urlencode
 
 import websockets
 
-BASE_WS_URL = "ws://34.106.160.70:8100/pipeline/v1/ws/scan_multi_7"  # replace 1 with your job_id/scan_id
+BASE_WS_URL = "ws://34.106.160.70:8100/api/detection/v1/ws/scan_multi_7"  # replace 1 with your job_id/scan_id
 
 
 def _load_env_value(key: str) -> str:

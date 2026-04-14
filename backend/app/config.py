@@ -92,7 +92,7 @@ class Settings(BaseSettings):
 
     # ── Pipeline Backend (separate service) ──────────────────
     PIPELINE_BACKEND_URL: str = "http://pipeline_backend:8100"
-    PIPELINE_API_PREFIX: str = "/pipeline/v1"
+    PIPELINE_API_PREFIX: str = "/api/detection/v1"
     PIPELINE_SHARED_TOKEN: str = ""
     PIPELINE_ENABLE_DOCS: bool = True
 

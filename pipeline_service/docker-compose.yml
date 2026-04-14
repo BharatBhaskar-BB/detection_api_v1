@@ -10,7 +10,7 @@ services:
       RABBITMQ_URL: amqp://guest:guest@host.docker.internal:5672/%2F
       PIPELINE_QUEUE_ENABLED: "true"
       PIPELINE_QUEUE_NAME: pipeline_jobs
-      PIPELINE_API_PREFIX: /pipeline/v1
+      PIPELINE_API_PREFIX: /api/detection/v1
       PIPELINE_ENABLE_DOCS: "false"
       PIPELINE_PUBLIC_BASE_URL: http://34.106.160.70:8100
       PIPELINE_CALLBACK_URL: ""

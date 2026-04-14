@@ -892,8 +892,14 @@ async def get_inventory_json(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """Return final inventory JSON from pipeline local result files."""
-    await authenticate_pipeline_request(x_pipeline_token, authorization)
+    user_id = await authenticate_pipeline_request(x_pipeline_token, authorization)
     scan_id = _validate_job_id(scan_id)
+
+    state = _load_job(scan_id)
+    if state is not None and user_id is not None:
+        owner_id = state.get("owner_user_id")
+        if owner_id and owner_id != user_id:
+            raise HTTPException(status_code=403, detail="Forbidden for this job")
 
     result_file = _upload_dir(scan_id) / "result.json"
     if not result_file.is_file():

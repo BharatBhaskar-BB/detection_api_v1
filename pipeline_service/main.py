@@ -35,8 +35,8 @@ app = FastAPI(
     title=f"{settings.APP_NAME} Pipeline Backend",
     version="1.0.0",
     lifespan=lifespan,
-    docs_url="/pipeline/docs" if settings.PIPELINE_ENABLE_DOCS else None,
-    redoc_url="/pipeline/redoc" if settings.PIPELINE_ENABLE_DOCS else None,
+    docs_url="/api/detection/docs" if settings.PIPELINE_ENABLE_DOCS else None,
+    redoc_url="/api/detection/redoc" if settings.PIPELINE_ENABLE_DOCS else None,
 )
 
 app.add_middleware(
@@ -51,6 +51,6 @@ app.include_router(pipeline_router, prefix=settings.PIPELINE_API_PREFIX)
 app.include_router(pipeline_ws_router, prefix=settings.PIPELINE_API_PREFIX)
 
 
-@app.get("/pipeline/v1/health")
+@app.get(f"{settings.PIPELINE_API_PREFIX}/health")
 async def health():
     return {"status": "ok", "service": "pipeline_backend"}

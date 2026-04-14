@@ -42,6 +42,6 @@ app.include_router(pipeline_router, prefix=settings.PIPELINE_API_PREFIX)
 app.include_router(pipeline_ws_router, prefix=settings.PIPELINE_API_PREFIX)
 
 
-@app.get("/pipeline/v1/health")
+@app.get(f"{settings.PIPELINE_API_PREFIX}/health")
 async def health():
     return {"status": "ok", "service": "pipeline_backend"}

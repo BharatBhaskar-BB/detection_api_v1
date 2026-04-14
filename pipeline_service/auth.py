@@ -51,6 +51,22 @@ async def authenticate_pipeline_request(
 
 
 async def verify_scan_access(scan_id: str, user_id: str | None) -> None:
-    """Standalone mode: scan ownership is enforced by callback target, not here."""
-    del scan_id, user_id
-    return None
+    """Check that the authenticated user owns this job/scan.
+
+    Service-token callers (user_id=None) are always allowed.
+    """
+    if user_id is None:
+        return
+
+    from pipeline_service.routes import _load_job
+
+    state = _load_job(scan_id)
+    if state is None:
+        return  # job not yet created — allow (will 404 later)
+
+    owner_id = state.get("owner_user_id")
+    if owner_id and owner_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden for this job",
+        )
