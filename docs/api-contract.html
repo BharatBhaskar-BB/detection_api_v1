@@ -192,9 +192,9 @@
       }
 
       pre {
-        background: #1e1e1e;
-        color: #d4d4d4;
-        border: 1px solid var(--border);
+        background: #faf5f5;
+        color: var(--text);
+        border: 1px solid #e8d5d5;
         border-radius: 6px;
         padding: 0.75rem 1rem;
         overflow-x: auto;
@@ -202,7 +202,6 @@
         font-size: 0.85rem;
         line-height: 1.5;
         margin: 0.5rem 0 1rem;
-        color: var(--text);
       }
       code {
         font-family: "SF Mono", "Fira Code", monospace;
@@ -353,11 +352,13 @@
     <nav class="toc">
       <ul>
         <li><a href="#base-urls">Base URLs</a></li>
+        <li><a href="#containers">Containers</a></li>
         <li><a href="#sequence">Call Sequence</a></li>
         <li><a href="#auth-apis">Auth APIs</a></li>
         <li><a href="#detection-apis">Detection APIs</a></li>
         <li><a href="#websocket">WebSocket</a></li>
         <li><a href="#errors">Error Codes</a></li>
+        <li><a href="#gcp-lb-guide">GCP LB Guide</a></li>
       </ul>
     </nav>
 
@@ -383,6 +384,85 @@
       All detection endpoints require an
       <code>Authorization: Bearer &lt;token&gt;</code> header (JWT obtained from
       auth endpoints).
+    </div>
+
+    <!-- ─── CONTAINERS ─── -->
+    <h2 id="containers">Container Architecture</h2>
+    <p>
+      The detection pipeline runs as <strong>6 containers</strong> on a GCP VM
+      with a Tesla T4 GPU.
+    </p>
+    <table class="field-table" style="margin: 1rem 0 1.5rem">
+      <thead>
+        <tr>
+          <th>Container</th>
+          <th>Image / Build</th>
+          <th>Port</th>
+          <th>Role</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>pipeline_service-pipeline_backend-1</td>
+          <td><code>pipeline_service/Dockerfile</code></td>
+          <td>8100</td>
+          <td>
+            Detection API &mdash; video processing, GDINO inference, LLM
+            inventory, WebSocket progress (GPU)
+          </td>
+        </tr>
+        <tr>
+          <td>deploy-backend-1</td>
+          <td><code>backend/Dockerfile</code></td>
+          <td>8000</td>
+          <td>
+            Backend API &mdash; auth, scans CRUD, job dispatch, push
+            notifications, PostgreSQL/SQLite
+          </td>
+        </tr>
+        <tr>
+          <td>deploy-rabbitmq-1</td>
+          <td><code>rabbitmq:3-management</code></td>
+          <td>5672 / 15672</td>
+          <td>
+            Message broker &mdash; <code>pipeline_jobs</code> queue between
+            backend &amp; pipeline service
+          </td>
+        </tr>
+        <tr>
+          <td>deploy-frontend-1</td>
+          <td><code>frontend/Dockerfile</code></td>
+          <td>3000 &rarr; 80</td>
+          <td>
+            React SPA &mdash; served via nginx, proxies
+            <code>/api/</code> requests
+          </td>
+        </tr>
+        <tr>
+          <td>gateway</td>
+          <td><code>nginx:latest</code></td>
+          <td>80 / 443</td>
+          <td>
+            Reverse proxy &mdash; TLS termination, routes
+            <code>/api/detection/</code> &rarr; :8100, <code>/api/</code> &rarr;
+            :8000
+          </td>
+        </tr>
+        <tr>
+          <td>florence-live</td>
+          <td>Florence model server</td>
+          <td>8200</td>
+          <td>
+            Florence live detection &mdash; real-time object detection for
+            camera feed
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="note">
+      <strong>GPU sharing:</strong> Pipeline service and backend share a single
+      Tesla T4 (15 GB VRAM). The gateway container uses a bind-mounted nginx
+      config at <code>/home/bharat.bhaskar/gateway/nginx.conf</code>.
     </div>
 
     <!-- ─── SEQUENCE ─── -->
@@ -812,6 +892,124 @@
       <code>Authorization: Bearer &lt;token&gt;</code> header.
     </div>
 
+    <!-- upload (direct) -->
+    <div class="endpoint">
+      <div
+        class="endpoint-header"
+        onclick="this.parentElement.classList.toggle('open')"
+      >
+        <span class="badge badge-post">POST</span>
+        <span class="path">/api/detection/v1/upload</span>
+        <span class="desc"
+          >Upload video + start processing (with explicit job_id)</span
+        >
+        <span class="badge badge-auth">AUTH</span>
+        <span class="chevron">▶</span>
+      </div>
+      <div class="endpoint-body">
+        <div class="note">
+          Lower-level endpoint used by the backend service. Mobile apps should
+          prefer
+          <code>POST /process-video</code> which auto-generates the job_id from
+          scan_id.
+        </div>
+        <p class="label">Request — multipart/form-data</p>
+        <table class="field-table">
+          <thead>
+            <tr>
+              <th>Field</th>
+              <th>Type</th>
+              <th>Description</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>job_id</td>
+              <td>string</td>
+              <td>
+                Unique job identifier (1–128 chars, alphanumeric +
+                <code>_-</code>)
+              </td>
+              <td class="required">required</td>
+            </tr>
+            <tr>
+              <td>file</td>
+              <td>file</td>
+              <td>Video file (must have <code>video/*</code> content type)</td>
+              <td class="required">required*</td>
+            </tr>
+            <tr>
+              <td>gcs_url</td>
+              <td>string</td>
+              <td>
+                GCS URL (<code>gs://bucket/...</code>) — alternative to file
+              </td>
+              <td class="optional">alternative*</td>
+            </tr>
+            <tr>
+              <td>scan_id</td>
+              <td>string</td>
+              <td>Scan identifier</td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>room_id</td>
+              <td>string</td>
+              <td>Room identifier</td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>room_name</td>
+              <td>string</td>
+              <td>Human-readable room name</td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>video_id</td>
+              <td>string</td>
+              <td>Video identifier</td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>request_user_id</td>
+              <td>string</td>
+              <td>Override user ID (service-to-service only)</td>
+              <td class="optional">optional</td>
+            </tr>
+          </tbody>
+        </table>
+        <p style="font-size: 0.85rem; color: var(--text-muted)">
+          * Provide either <code>file</code> or <code>gcs_url</code>, not both.
+        </p>
+        <p class="label">Response 202</p>
+        <pre><code>{
+  "status": "accepted",
+  "job_id": "job_789",
+  "websocket_url": "/api/detection/v1/ws/job_789",
+  "result_url": "/api/detection/v1/upload/job_789",
+  "scan_id": "scan_123",
+  "room_id": null,
+  "user_id": "uuid",
+  "video_id": "v1",
+  "room_name": "Living Room"
+}</code></pre>
+        <p class="label">Errors</p>
+        <table class="error-table">
+          <tbody>
+            <tr>
+              <td>400</td>
+              <td>File must be a video / no input provided / invalid job_id</td>
+            </tr>
+            <tr>
+              <td>401</td>
+              <td>Missing or invalid auth</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- process-video -->
     <div class="endpoint open">
       <div
@@ -878,10 +1076,15 @@
         </p>
         <p class="label">Response 202</p>
         <pre><code>{
-  "status": "queued",
+  "status": "accepted",
   "job_id": "scan_123",
   "websocket_url": "/api/detection/v1/ws/scan_123",
-  "result_url": "/api/detection/v1/upload/scan_123"
+  "result_url": "/api/detection/v1/upload/scan_123",
+  "scan_id": "scan_123",
+  "room_id": null,
+  "user_id": "uuid",
+  "video_id": 1,
+  "room_name": null
 }</code></pre>
         <p class="label">Errors</p>
         <table class="error-table">
@@ -947,16 +1150,33 @@
               <td>Human-readable room name</td>
               <td class="optional">optional</td>
             </tr>
+            <tr>
+              <td>video_id</td>
+              <td>string</td>
+              <td>Video identifier</td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>request_user_id</td>
+              <td>string</td>
+              <td>Override user ID (service-to-service)</td>
+              <td class="optional">optional</td>
+            </tr>
           </tbody>
         </table>
         <p class="label">Response 202</p>
         <pre><code>{
-  "status": "awaiting_upload",
+  "status": "accepted",
   "job_id": "job_789",
   "websocket_url": "/api/detection/v1/ws/job_789",
   "result_url": "/api/detection/v1/upload/job_789",
   "upload_url": "/api/detection/v1/upload/job_789/file",
-  "trigger_url": "/api/detection/v1/upload/job_789/trigger"
+  "trigger_url": "/api/detection/v1/upload/job_789/trigger",
+  "scan_id": "scan_123",
+  "room_id": null,
+  "user_id": "uuid",
+  "video_id": null,
+  "room_name": null
 }</code></pre>
       </div>
     </div>
@@ -997,13 +1217,42 @@
               <td>GCS URL — alternative to file</td>
               <td class="optional">alternative*</td>
             </tr>
+            <tr>
+              <td>scan_id</td>
+              <td>string</td>
+              <td>Override scan identifier</td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>room_id</td>
+              <td>string</td>
+              <td>Override room identifier</td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>room_name</td>
+              <td>string</td>
+              <td>Override room name</td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>video_id</td>
+              <td>string</td>
+              <td>Override video identifier</td>
+              <td class="optional">optional</td>
+            </tr>
           </tbody>
         </table>
         <p class="label">Response 201</p>
         <pre><code>{
   "status": "uploaded",
   "job_id": "job_789",
-  "video_filename": "video.mp4"
+  "video_filename": "video.mp4",
+  "scan_id": "scan_123",
+  "room_id": null,
+  "user_id": "uuid",
+  "video_id": null,
+  "room_name": null
 }</code></pre>
         <p class="label">Errors</p>
         <table class="error-table">
@@ -1042,10 +1291,15 @@
         <p>No body required. Auth header only.</p>
         <p class="label">Response 202</p>
         <pre><code>{
-  "status": "queued",
+  "status": "accepted",
   "job_id": "job_789",
   "websocket_url": "/api/detection/v1/ws/job_789",
-  "result_url": "/api/detection/v1/upload/job_789"
+  "result_url": "/api/detection/v1/upload/job_789",
+  "scan_id": "scan_123",
+  "room_id": null,
+  "user_id": "uuid",
+  "video_id": null,
+  "room_name": null
 }</code></pre>
         <p class="label">Errors</p>
         <table class="error-table">
@@ -1372,6 +1626,372 @@
         </tr>
       </tbody>
     </table>
+
+    <!-- ─── GCP LB GUIDE ─── -->
+    <h2 id="gcp-lb-guide">5. GCP Load Balancer — Route Configuration Guide</h2>
+
+    <p>
+      BundleBox uses a <strong>GCP Application Load Balancer</strong> to route
+      traffic from <code>dev.bundlebox.ai</code> to backend services running on
+      a single GCP VM. This section explains the routing architecture and how to
+      add new routes — using the detection pipeline as a worked example.
+    </p>
+
+    <h3>5.1 Architecture Overview</h3>
+    <div class="sequence">
+      <pre><code>Client (mobile app / browser)
+    │
+    ▼
+┌─────────────────────────────────────────┐
+│  GCP Application Load Balancer          │
+│  IP: 34.102.214.243                     │
+│  Domain: dev.bundlebox.ai               │
+│  SSL: Google-managed certificate        │
+│  URL Map: bundlebox-lb                  │
+│                                         │
+│  Route Rules (by priority):             │
+│   /scanner/sc1/*    → dev-scanner       │
+│   /scanner/live-*   → dev-scanner       │
+│   /crm/*            → crm-backend       │
+│   /api/detection/*  → dev-scanner  ← NEW│
+│   /auth/*           → vibe-check        │
+│   /api/*            → dev-scanner       │
+│   /*                → 404 catch-all     │
+└─────────────────────┬───────────────────┘
+                      │ HTTPS (self-signed)
+                      ▼
+┌─────────────────────────────────────────┐
+│  Gateway Nginx (port 443)               │
+│  Container: gateway                     │
+│                                         │
+│  /api/detection/*  → :8100 (pipeline)   │
+│  /api/*            → :8000 (backend)    │
+│  /pipeline/*       → :8100 (legacy)     │
+│  /live-detection/* → :8200 (florence)   │
+│  /*                → :3000 (frontend)   │
+└─────────────────────────────────────────┘</code></pre>
+    </div>
+    <div class="note">
+      <strong>Two-layer routing:</strong> The GCP LB selects which
+      <em>backend service</em> (i.e. which VM) to send traffic to. The gateway
+      nginx on the VM then routes to the correct <em>container port</em>. Both
+      layers must be configured.
+    </div>
+
+    <h3>5.2 Key Concepts</h3>
+    <table class="field-table">
+      <thead>
+        <tr>
+          <th>Concept</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>URL Map</td>
+          <td>
+            The routing table. Maps URL patterns → backend services. Ours is
+            named <code>bundlebox-lb</code>.
+          </td>
+        </tr>
+        <tr>
+          <td>Backend Service</td>
+          <td>
+            A named target (e.g. <code>dev-scanner-backend</code>) pointing to
+            an instance group / NEG. Has its own timeout, health check, and
+            protocol settings.
+          </td>
+        </tr>
+        <tr>
+          <td>Host Rule</td>
+          <td>
+            Maps a domain (e.g. <code>dev.bundlebox.ai</code>) to a
+            <code>pathMatcher</code>.
+          </td>
+        </tr>
+        <tr>
+          <td>Path Matcher</td>
+          <td>
+            Contains ordered <code>routeRules</code> with priorities. Lower
+            priority number = matched first.
+          </td>
+        </tr>
+        <tr>
+          <td>Route Rule</td>
+          <td>
+            A <code>matchRule</code> (prefix or exact path) + action (forward to
+            backend, redirect, or rewrite).
+          </td>
+        </tr>
+        <tr>
+          <td>Priority</td>
+          <td>
+            Integer. Rules are evaluated lowest-first.
+            <strong>Must be listed in ascending order in the YAML.</strong>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>5.3 Step-by-Step: Adding a New Route</h3>
+    <p>
+      The following steps show exactly how <code>/api/detection/*</code> was
+      added for the detection pipeline.
+    </p>
+
+    <h3 style="margin-top: 1.5rem">Step 1 — Export the current URL map</h3>
+    <pre><code># Export to a local YAML file
+gcloud compute url-maps export bundlebox-lb \
+  --global \
+  --destination=/tmp/bundlebox-lb.yaml</code></pre>
+
+    <h3>Step 2 — Inspect existing route rules</h3>
+    <p>
+      Open the YAML and look at the <code>routeRules</code> array inside
+      <code>pathMatchers</code>. Note the highest priority number in use — your
+      new rule must slot in correctly.
+    </p>
+    <pre><code># Existing rules before our change:
+# Priority 1-2: /scanner/sc1/*
+# Priority 3-4: /scanner/live-detection/*
+# Priority 5:   /crm/*
+# Priority 7-8: /auth/*
+# Priority 100: /* (catch-all)</code></pre>
+
+    <h3>Step 3 — Add the new route rule</h3>
+    <p>
+      Insert a new <code>routeRule</code> block. For the detection pipeline, we
+      added two rules:
+    </p>
+
+    <p class="label">
+      Rule 1: <code>/api/detection/*</code> (priority 6) — specific route for
+      pipeline service
+    </p>
+    <pre><code>      - matchRules:
+          - prefixMatch: /api/detection/
+        priority: 6
+        routeAction:
+          weightedBackendServices:
+            - backendService: https://www.googleapis.com/compute/v1/projects/PROJECT/global/backendServices/dev-scanner-backend
+              weight: 100</code></pre>
+
+    <p class="label">
+      Rule 2: <code>/api/*</code> (priority 9) — general API catch-all for
+      backend
+    </p>
+    <pre><code>      - matchRules:
+          - prefixMatch: /api/
+        priority: 9
+        routeAction:
+          weightedBackendServices:
+            - backendService: https://www.googleapis.com/compute/v1/projects/PROJECT/global/backendServices/dev-scanner-backend
+              weight: 100</code></pre>
+
+    <div class="warn">
+      <strong>Priority ordering matters!</strong>
+      <code>/api/detection/</code> (priority 6) must come <em>before</em>
+      <code>/api/</code> (priority 9), otherwise the broader
+      <code>/api/</code> prefix would match first and the detection-specific
+      rule would never trigger.
+    </div>
+
+    <h3>Step 4 — Validate YAML ordering</h3>
+    <p>
+      GCP requires route rules to be listed in
+      <strong>ascending priority order</strong> within the YAML file. If they're
+      out of order, the import will fail with:
+    </p>
+    <pre><code>HTTPError 400: Invalid value for field 'resource.pathMatchers[0].routeRules[N].priority':
+'9'. Within a pathMatcher, a route rule must have a priority that's higher than
+the previous route rule's priority</code></pre>
+    <p>Correct order for our config:</p>
+    <pre><code># ✅ Correct: ascending priority in YAML
+Priority 1: /scanner/sc1       (redirect)
+Priority 2: /scanner/sc1/*     (rewrite → /)
+Priority 3: /scanner/live-detection  (redirect)
+Priority 4: /scanner/live-detection/* (rewrite)
+Priority 5: /crm/*
+Priority 6: /api/detection/*    ← NEW
+Priority 7: /auth              (redirect)
+Priority 8: /auth/*            (rewrite → /)
+Priority 9: /api/*             ← NEW
+Priority 100: /*               (catch-all)</code></pre>
+
+    <h3>Step 5 — Import the updated URL map</h3>
+    <pre><code>gcloud compute url-maps import bundlebox-lb \
+  --global \
+  --source=/tmp/bundlebox-lb.yaml \
+  --quiet</code></pre>
+    <div class="note">
+      The <code>--quiet</code> flag skips the confirmation prompt. The
+      <code>fingerprint</code>
+      field in the YAML provides optimistic concurrency — if someone else
+      modified the URL map since your export, the import will warn (but still
+      succeed today; future gcloud versions may reject stale fingerprints).
+    </div>
+
+    <h3>Step 6 — Update backend service timeout (if needed)</h3>
+    <p>
+      Detection pipeline jobs can take several minutes. The default 30s backend
+      timeout will kill long requests. We increased it to 600s:
+    </p>
+    <pre><code>gcloud compute backend-services update dev-scanner-backend \
+  --global \
+  --timeout=600</code></pre>
+    <div class="warn">
+      <strong>Note:</strong> <code>maxStreamDuration</code> in route rules is
+      only supported for <code>INTERNAL_SELF_MANAGED</code> load balancing
+      schemes. For external Application LBs, use the backend service
+      <code>--timeout</code> instead.
+    </div>
+
+    <h3>Step 7 — Update gateway nginx on the VM</h3>
+    <p>
+      The GCP LB forwards traffic to the VM, but nginx on the VM must also know
+      how to route it to the correct container port.
+    </p>
+    <pre><code># SSH into the VM
+gcloud compute ssh bharat.bhaskar@gpu-instance-bundlebox-t4 \
+  --zone=us-west3-b --project=second-raceway-477108-k9
+
+# Edit the gateway nginx config (bind-mounted)
+vim /home/bharat.bhaskar/gateway/nginx.conf</code></pre>
+
+    <p class="label">
+      Add the new location block (order matters — more specific first):
+    </p>
+    <pre><code>    # ── Detection API (pipeline service) ──
+    location /api/detection/ {
+        proxy_pass http://host.docker.internal:8100;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host       $host;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+
+    # ── BundleBox API (backend) ──
+    location /api/ {
+        proxy_pass http://host.docker.internal:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host       $host;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }</code></pre>
+    <div class="warn">
+      <strong>nginx prefix matching:</strong> <code>/api/detection/</code> must
+      appear <em>before</em> <code>/api/</code> in the config file. nginx uses
+      first-match for <code>location</code> prefix blocks.
+    </div>
+
+    <p class="label">Reload nginx without downtime:</p>
+    <pre><code>docker exec gateway nginx -s reload</code></pre>
+
+    <h3>Step 8 — Verify end-to-end</h3>
+    <pre><code># 1. Test through the full chain (LB → nginx → container)
+curl -s https://dev.bundlebox.ai/api/detection/v1/health
+# → {"status":"ok","service":"pipeline_backend"}
+
+# 2. Verify backend API still works
+curl -s -o /dev/null -w "%{http_code}" https://dev.bundlebox.ai/api/v1/health
+# → 200
+
+# 3. Verify old prefix is dead
+curl -s -o /dev/null -w "%{http_code}" https://dev.bundlebox.ai/pipeline/v1/health
+# → 502 (no route on pipeline service for old prefix)</code></pre>
+
+    <h3>5.4 Common Gotchas</h3>
+    <table class="field-table">
+      <thead>
+        <tr>
+          <th>Issue</th>
+          <th>Cause</th>
+          <th>Fix</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Import fails with priority error</td>
+          <td>Route rules not in ascending priority order in YAML</td>
+          <td>
+            Reorder the <code>routeRules</code> array so priorities go 1, 2, 3,
+            … ascending
+          </td>
+        </tr>
+        <tr>
+          <td>Import fails with maxStreamDuration error</td>
+          <td><code>maxStreamDuration</code> not supported on external ALBs</td>
+          <td>
+            Remove it from route rules; use <code>--timeout</code> on the
+            backend service instead
+          </td>
+        </tr>
+        <tr>
+          <td>502 Bad Gateway after LB update</td>
+          <td>Gateway nginx not updated, or container env var mismatch</td>
+          <td>
+            Add matching <code>location</code> block in nginx config and
+            <code>nginx -s reload</code>
+          </td>
+        </tr>
+        <tr>
+          <td>404 on correct URL</td>
+          <td>Container built with old code; env var not picked up</td>
+          <td>
+            Rebuild with <code>docker compose up -d --build</code>; verify with
+            <code>docker exec ... env | grep PREFIX</code>
+          </td>
+        </tr>
+        <tr>
+          <td>Broader prefix matches instead of specific</td>
+          <td>Specific rule has higher priority number than general rule</td>
+          <td>
+            Give the more-specific path a <em>lower</em> priority number
+            (matched first)
+          </td>
+        </tr>
+        <tr>
+          <td>Edits to nginx config inside container lost on restart</td>
+          <td>Config is baked into image, not bind-mounted</td>
+          <td>
+            Edit the host file and <code>nginx -s reload</code>; or rebuild the
+            image
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>5.5 Quick Reference Commands</h3>
+    <pre><code># Export URL map
+gcloud compute url-maps export bundlebox-lb --global --destination=/tmp/bundlebox-lb.yaml
+
+# Import URL map
+gcloud compute url-maps import bundlebox-lb --global --source=/tmp/bundlebox-lb.yaml --quiet
+
+# Describe URL map (read-only)
+gcloud compute url-maps describe bundlebox-lb --global
+
+# List all backend services
+gcloud compute backend-services list --global
+
+# Update backend timeout
+gcloud compute backend-services update BACKEND_NAME --global --timeout=SECONDS
+
+# Describe backend service
+gcloud compute backend-services describe BACKEND_NAME --global
+
+# SSH to VM
+gcloud compute ssh bharat.bhaskar@gpu-instance-bundlebox-t4 --zone=us-west3-b --project=second-raceway-477108-k9
+
+# Reload nginx on VM
+docker exec gateway nginx -s reload
+
+# Check container env vars
+docker exec CONTAINER_NAME env | grep PIPELINE</code></pre>
 
     <footer>
       <span class="brand">Bundle</span>Box Detection API v1.0 &bull; Generated

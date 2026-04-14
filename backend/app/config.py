@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     PIPELINE_SHARED_TOKEN: str = ""
     PIPELINE_ENABLE_DOCS: bool = True
 
+    # ── External JWT (mobile app auth) ───────────────────────
+    JWT_SECRET: str = ""
+
     # ── Web Push (VAPID) ─────────────────────────────────────
     VAPID_PRIVATE_KEY: str = ""
     VAPID_PUBLIC_KEY: str = ""
