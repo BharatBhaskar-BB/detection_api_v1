@@ -74,9 +74,9 @@ async def authenticate_pipeline_request(
     # 2. External JWT (mobile app) — try first
     ext_payload = _decode_external_jwt(token)
     if ext_payload:
-        user_id = ext_payload.get("userId")
+        user_id = ext_payload.get("sub") or ext_payload.get("userId")
         if not user_id:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token missing userId")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token missing user identity")
         return user_id
 
     # 3. Internal JWT (PWA fallback)
