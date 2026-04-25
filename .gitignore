@@ -1,1 +1,13 @@
 .DS_Store
+*.pyc
+__pycache__/
+.env
+.env.prod
+.env.florence
+deploy/.env.prod
+deploy/.env.florence
+*.db
+node_modules/
+dev-dist/
+uploads/
+outputs/
