@@ -68,6 +68,8 @@ services:
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
       PIPELINE_API_PREFIX: /api/detection/v1
+      PIPELINE_CALLBACK_URL: http://backend:8000/api/v1/pipeline-callback/event
+      STORE_DB: "false"
       DATABASE_URL: sqlite+aiosqlite:////app/data/bundlebox.db
     ports:
       - "8110:8100"
