@@ -377,7 +377,10 @@ class LLMInventoryDrafter:
     # ── API Calls ──
 
     async def _call_gemini(self, prompt: str, frames: list[SelectedFrame] | None = None, max_output_tokens: int = 16000) -> tuple[str, dict]:
-        """Call Gemini with text + optional images. Returns (response_text, usage)."""
+        """Call Gemini with text + optional images. Returns (response_text, usage).
+
+        Retries up to 4 times with exponential backoff on 429/RESOURCE_EXHAUSTED.
+        """
         from google import genai
         from google.genai import types
         from PIL import Image
@@ -404,11 +407,24 @@ class LLMInventoryDrafter:
             thinking_config=thinking_config,
         )
 
-        response = await client.aio.models.generate_content(
-            model=self.gemini_model,
-            contents=parts,
-            config=gen_config,
-        )
+        max_retries = 4
+        for attempt in range(max_retries + 1):
+            try:
+                response = await client.aio.models.generate_content(
+                    model=self.gemini_model,
+                    contents=parts,
+                    config=gen_config,
+                )
+                break
+            except Exception as exc:
+                exc_str = str(exc)
+                if ("429" in exc_str or "RESOURCE_EXHAUSTED" in exc_str) and attempt < max_retries:
+                    delay = 2 ** (attempt + 1)  # 2, 4, 8, 16 seconds
+                    logger.warning(f"Gemini rate limited (attempt {attempt+1}/{max_retries+1}), "
+                                   f"retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                else:
+                    raise
 
         text = response.text or ""
         usage_meta = getattr(response, "usage_metadata", None)
@@ -625,6 +641,9 @@ class LLMInventoryDrafter:
 
         # ── Run batch LLM calls in parallel ──
         async def process_batch(batch_frames, start_s, end_s, batch_idx):
+            # Stagger requests to avoid hitting rate limits
+            if batch_idx > 0:
+                await asyncio.sleep(batch_idx * 1.5)
             prompt = self._build_batch_prompt(
                 batch_frames, transcript, start_s, end_s, duration_s
             )
