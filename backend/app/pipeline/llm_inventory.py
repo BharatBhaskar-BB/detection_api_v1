@@ -547,15 +547,15 @@ class LLMInventoryDrafter:
         batch_texts: list[str],
         frame_timestamps: list[float],
     ) -> None:
-        """Restore best_frame_ts from batch originals — always prefer batch values.
+        """Restore best_frame_ts from batch originals when merge corrupted them.
 
-        The LLM merge frequently invents fake timestamps (e.g., 0.4, 0.44, 0.48
-        instead of 40, 44, 48). Since batch responses see the actual frames with
-        real timestamps, their values are always more reliable than the merge output.
+        The LLM merge sometimes invents fake timestamps. However, batch responses
+        can also have bad timestamps. Only replace the merge timestamp when:
+        - The merge timestamp is INVALID (not near any real frame), AND
+        - The batch timestamp IS valid (near a real frame).
 
-        Strategy: for every merged item, look up the original batch timestamp by
-        (name, room) or by name alone, and USE IT unconditionally. Only keep the
-        merged timestamp if no batch original is found.
+        This conservative approach prevents replacing good merge timestamps
+        with bad batch timestamps.
 
         Mutates merged_items in place.
         """
@@ -588,32 +588,37 @@ class LLMInventoryDrafter:
 
         n_fixed = 0
         for item in merged_items:
-            # Try exact (name, room) match — ALWAYS prefer batch original
+            merge_valid = _is_valid_ts(item.best_frame_ts)
+            if merge_valid:
+                # Merge timestamp is already near a real frame — keep it
+                continue
+
+            # Merge timestamp is invalid — try to restore from batch
             key = (item.name, item.room)
             if key in batch_ts_lookup:
                 batch_ts = batch_ts_lookup[key]
-                if item.best_frame_ts != batch_ts:
-                    old_ts = item.best_frame_ts
-                    item.best_frame_ts = batch_ts
-                    n_fixed += 1
-                    logger.debug(f"Restored ts for '{item.name}' [{item.room}]: "
-                                 f"{old_ts} → {batch_ts}")
+                old_ts = item.best_frame_ts
+                item.best_frame_ts = batch_ts
+                n_fixed += 1
+                logger.debug(f"Restored ts for '{item.name}' [{item.room}]: "
+                             f"{old_ts} → {batch_ts}")
                 continue
 
             # Try name-only match (room names may differ after merge renumbering)
             if item.name in name_ts_lookup:
                 candidates = name_ts_lookup[item.name]
                 batch_ts = candidates[0]
-                if item.best_frame_ts != batch_ts:
-                    old_ts = item.best_frame_ts
-                    item.best_frame_ts = batch_ts
-                    n_fixed += 1
-                    logger.debug(f"Restored ts (name-only) for '{item.name}' [{item.room}]: "
-                                 f"{old_ts} → {batch_ts}")
+                old_ts = item.best_frame_ts
+                item.best_frame_ts = batch_ts
+                n_fixed += 1
+                logger.debug(f"Restored ts (name-only) for '{item.name}' [{item.room}]: "
+                             f"{old_ts} → {batch_ts}")
                 continue
 
         if n_fixed:
             logger.info(f"Timestamp restoration: fixed {n_fixed}/{len(merged_items)} items")
+        else:
+            logger.info(f"Timestamp restoration: all {len(merged_items)} items already valid")
 
     # ── Programmatic merge fallback ──
 

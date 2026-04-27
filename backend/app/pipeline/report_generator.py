@@ -290,7 +290,6 @@ def _encode_evidence_frames(
     from app.pipeline.evidence_renderer import render_evidence
 
     results: list[Optional[str]] = []
-    raw_frame_cache: dict[int, str] = {}
     for i, idx in enumerate(frame_indices):
         centroid = centroids[i] if i < len(centroids) else None
 
@@ -303,12 +302,26 @@ def _encode_evidence_frames(
             )
             results.append(base64.b64encode(buf).decode("utf-8"))
         else:
-            if idx not in raw_frame_cache:
-                _, buf = cv2.imencode(
-                    ".jpg", all_frames[idx].frame, [cv2.IMWRITE_JPEG_QUALITY, 80]
-                )
-                raw_frame_cache[idx] = base64.b64encode(buf).decode("utf-8")
-            results.append(raw_frame_cache[idx])
+            # No centroid — render item name label on the frame for uniqueness.
+            # Each item gets its own labeled copy instead of sharing a cached raw frame.
+            frame_copy = all_frames[idx].frame.copy()
+            h, w = frame_copy.shape[:2]
+            label = items[i].name.capitalize()
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.7
+            thickness = 2
+            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+            lx = max(4, (w - tw) // 2)
+            ly = h - 20
+            pad = 5
+            overlay = frame_copy.copy()
+            cv2.rectangle(overlay, (lx - pad, ly - th - pad),
+                          (lx + tw + pad, ly + baseline + pad), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.6, frame_copy, 0.4, 0, frame_copy)
+            cv2.putText(frame_copy, label, (lx, ly), font, font_scale,
+                        (255, 255, 255), thickness, cv2.LINE_AA)
+            _, buf = cv2.imencode(".jpg", frame_copy, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            results.append(base64.b64encode(buf).decode("utf-8"))
 
     return results
 
