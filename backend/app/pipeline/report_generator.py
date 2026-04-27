@@ -86,7 +86,7 @@ async def _estimate_centroids(
     """Estimate centroid [y, x] (0-1000 scale) for each item in its evidence frame.
 
     This is a DISPLAY-ONLY step — completely decoupled from inventory counting.
-    Makes a single batched Gemini call with all evidence frames + item names.
+    Batches items by frame to keep per-call payloads small and reliable.
 
     Args:
         items: Inventory items (name used for locating).
@@ -105,85 +105,81 @@ async def _estimate_centroids(
         logger.debug("No Gemini API key — skipping centroid estimation")
         return [None] * len(items)
 
-    # Build a compact prompt with unique frames and item list
-    unique_frame_indices = sorted(set(frame_indices))
-    frame_map = {idx: i for i, idx in enumerate(unique_frame_indices)}  # frame_idx -> position in prompt
-
-    item_list = []
-    for i, item in enumerate(items):
-        fidx = frame_indices[i]
-        item_list.append({
-            "id": i,
-            "name": item.name,
-            "frame_number": frame_map[fidx] + 1,  # 1-based for LLM
-        })
-
-    prompt = (
-        "For each item below, find it in the specified frame and return its approximate\n"
-        "center point as [y, x] on a 0-1000 scale (0,0 = top-left, 1000,1000 = bottom-right).\n"
-        "If you cannot find the item, return null for its centroid.\n\n"
-        "Items:\n"
-    )
-    for entry in item_list:
-        prompt += f"  {entry['id']}: \"{entry['name']}\" in Frame {entry['frame_number']}\n"
-
-    prompt += (
-        "\nRespond with ONLY valid JSON:\n"
-        '{"centroids": [[y, x], [y, x], null, ...]}\n'
-        "The array must have exactly " + str(len(items)) + " entries, one per item.\n"
-    )
-
     try:
         from google import genai
         from google.genai import types
         from PIL import Image
+        from app.pipeline.llm_inventory import _parse_centroid
 
         client = genai.Client(api_key=api_key)
-
-        parts: list = [prompt]
-        for idx in unique_frame_indices:
-            parts.append(f"Frame {frame_map[idx] + 1}:")
-            frame_rgb = cv2.cvtColor(frames[idx].frame, cv2.COLOR_BGR2RGB)
-            parts.append(Image.fromarray(frame_rgb))
-
-        thinking_config = None
-        model_name = settings.GEMINI_MODEL
-        if "2.5" in model_name:
-            thinking_config = types.ThinkingConfig(thinking_budget=512)
-
-        gen_config = types.GenerateContentConfig(
-            max_output_tokens=4000,
-            temperature=0.1,
-            response_mime_type="application/json",
-            thinking_config=thinking_config,
-        )
-
-        response = await client.aio.models.generate_content(
-            model=model_name,
-            contents=parts,
-            config=gen_config,
-        )
-
-        text = response.text or ""
-        data = json.loads(text)
-        raw_centroids = data.get("centroids", [])
-
-        # Validate each centroid
-        from app.pipeline.llm_inventory import _parse_centroid
-        result = []
-        for i in range(len(items)):
-            if i < len(raw_centroids):
-                result.append(_parse_centroid(raw_centroids[i]))
-            else:
-                result.append(None)
-
-        n_found = sum(1 for c in result if c is not None)
-        logger.info(f"Centroid estimation: {n_found}/{len(items)} items located")
-        return result
-
     except Exception as e:
-        logger.warning(f"Centroid estimation failed (non-fatal): {e}")
+        logger.warning(f"Centroid setup failed: {e}")
         return [None] * len(items)
+
+    # Group items by their assigned frame index
+    frame_to_items: dict[int, list[int]] = {}
+    for i, fidx in enumerate(frame_indices):
+        frame_to_items.setdefault(fidx, []).append(i)
+
+    result: list[Optional[list[int]]] = [None] * len(items)
+
+    thinking_config = None
+    model_name = settings.GEMINI_MODEL
+    if "2.5" in model_name:
+        thinking_config = types.ThinkingConfig(thinking_budget=256)
+
+    # Process each frame's items in a single call (max ~30 items per frame typically)
+    for fidx, item_ids in frame_to_items.items():
+        if fidx >= len(frames):
+            continue
+
+        # Build item list for this frame
+        item_entries = []
+        for local_i, global_i in enumerate(item_ids):
+            item_entries.append(f'  {local_i}: "{items[global_i].name}"')
+
+        prompt = (
+            "Look at this image. For each item below, find it and return its center "
+            "as [y, x] on a 0-1000 scale (0,0 = top-left, 1000,1000 = bottom-right).\n"
+            "If you cannot find the item, return null.\n\n"
+            "Items:\n" + "\n".join(item_entries) + "\n\n"
+            "Respond with ONLY valid JSON:\n"
+            '{"centroids": [[y, x], [y, x], null, ...]}\n'
+            f"Array must have exactly {len(item_ids)} entries.\n"
+        )
+
+        try:
+            frame_rgb = cv2.cvtColor(frames[fidx].frame, cv2.COLOR_BGR2RGB)
+            parts: list = [prompt, Image.fromarray(frame_rgb)]
+
+            gen_config = types.GenerateContentConfig(
+                max_output_tokens=2000,
+                temperature=0.1,
+                response_mime_type="application/json",
+                thinking_config=thinking_config,
+            )
+
+            response = await client.aio.models.generate_content(
+                model=model_name,
+                contents=parts,
+                config=gen_config,
+            )
+
+            text = (response.text or "").strip()
+            data = json.loads(text)
+            raw_centroids = data.get("centroids", [])
+
+            for local_i, global_i in enumerate(item_ids):
+                if local_i < len(raw_centroids):
+                    result[global_i] = _parse_centroid(raw_centroids[local_i])
+
+        except Exception as e:
+            logger.warning(f"Centroid estimation failed for frame {fidx} ({len(item_ids)} items): {e}")
+            # Items in this frame get None centroids — no vignette, just raw frame
+
+    n_found = sum(1 for c in result if c is not None)
+    logger.info(f"Centroid estimation: {n_found}/{len(items)} items located")
+    return result
 
 
 def _extract_evidence_frame(
@@ -215,7 +211,11 @@ def _assign_frame_indices(
     items: list,
     all_frames: list[SelectedFrame],
 ) -> list[int]:
-    """Assign each item a frame index, ensuring variety when possible.
+    """Assign each item a frame index based on the LLM's best_frame_ts.
+
+    Uses the timestamp where the LLM reported seeing the item to find the
+    closest selected frame. Never redistributes items to unrelated frames —
+    it's better to have multiple items share a frame than show wrong evidence.
 
     Returns a list of frame indices (one per item).
     """
@@ -225,21 +225,15 @@ def _assign_frame_indices(
     n_frames = len(all_frames)
     frame_timestamps = [f.timestamp_s for f in all_frames]
 
-    # First pass: assign each item to its closest frame
     assignments: list[int] = []
     for item in items:
         ts = item.best_frame_ts
         if ts is None:
+            # No timestamp — pick the middle frame as a neutral fallback
             assignments.append(n_frames // 2)
         else:
             best_idx = min(range(n_frames), key=lambda i: abs(frame_timestamps[i] - ts))
             assignments.append(best_idx)
-
-    # Redistribute if most items map to the same few frames
-    unique_frames = set(assignments)
-    if len(unique_frames) < min(len(items), n_frames) // 2 and len(items) > 1 and n_frames > 1:
-        for i in range(len(items)):
-            assignments[i] = int(i * n_frames / len(items))
 
     return assignments
 
