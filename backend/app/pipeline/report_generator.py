@@ -126,14 +126,13 @@ async def _estimate_centroids(
     thinking_config = None
     model_name = settings.GEMINI_MODEL
     if "2.5" in model_name:
-        thinking_config = types.ThinkingConfig(thinking_budget=256)
+        thinking_config = types.ThinkingConfig(thinking_budget=0)
 
-    # Process each frame's items in a single call (max ~30 items per frame typically)
-    for fidx, item_ids in frame_to_items.items():
+    # Build async tasks for ALL frames — run in parallel
+    async def _estimate_one_frame(fidx: int, item_ids: list[int]):
         if fidx >= len(frames):
-            continue
+            return []
 
-        # Build item list for this frame
         item_entries = []
         for local_i, global_i in enumerate(item_ids):
             item_entries.append(f'  {local_i}: "{items[global_i].name}"')
@@ -169,13 +168,25 @@ async def _estimate_centroids(
             data = json.loads(text)
             raw_centroids = data.get("centroids", [])
 
+            pairs = []
             for local_i, global_i in enumerate(item_ids):
                 if local_i < len(raw_centroids):
-                    result[global_i] = _parse_centroid(raw_centroids[local_i])
+                    pairs.append((global_i, _parse_centroid(raw_centroids[local_i])))
+            return pairs
 
         except Exception as e:
             logger.warning(f"Centroid estimation failed for frame {fidx} ({len(item_ids)} items): {e}")
-            # Items in this frame get None centroids — no vignette, just raw frame
+            return []
+
+    # Fire all frame centroid calls concurrently
+    tasks = [
+        _estimate_one_frame(fidx, item_ids)
+        for fidx, item_ids in frame_to_items.items()
+    ]
+    all_pairs = await asyncio.gather(*tasks)
+    for pairs in all_pairs:
+        for global_i, centroid in pairs:
+            result[global_i] = centroid
 
     n_found = sum(1 for c in result if c is not None)
     logger.info(f"Centroid estimation: {n_found}/{len(items)} items located")
@@ -332,9 +343,13 @@ async def generate_report(
     frame_indices = _assign_frame_indices(inventory.items, selected_frames)
 
     # Step 2: Estimate centroids in a separate LLM call (display-only)
+    import time as _time
+    _t0 = _time.time()
     centroids = await _estimate_centroids(
         inventory.items, selected_frames, frame_indices
     )
+    _t1 = _time.time()
+    logger.info(f"[TIMING] centroid_estimation: {_t1-_t0:.1f}s")
 
     # Step 3: Encode evidence frames with optional vignette overlay
     evidence_images = _encode_evidence_frames(

@@ -412,7 +412,7 @@ class LLMInventoryDrafter:
         # For 2.5 models, constrain thinking budget to avoid consuming output tokens
         thinking_config = None
         if "2.5" in model_name:
-            thinking_config = types.ThinkingConfig(thinking_budget=1024)
+            thinking_config = types.ThinkingConfig(thinking_budget=128)
 
         gen_config = types.GenerateContentConfig(
             max_output_tokens=max_output_tokens,
@@ -657,7 +657,7 @@ class LLMInventoryDrafter:
         async def process_batch(batch_frames, start_s, end_s, batch_idx):
             # Stagger requests to avoid hitting rate limits
             if batch_idx > 0:
-                await asyncio.sleep(batch_idx * 1.5)
+                await asyncio.sleep(batch_idx * 0.5)
             prompt = self._build_batch_prompt(
                 batch_frames, transcript, start_s, end_s, duration_s
             )
@@ -765,7 +765,7 @@ class LLMInventoryDrafter:
 
         async def process_batch(batch_frames, start_s, end_s, batch_idx):
             if batch_idx > 0:
-                await asyncio.sleep(batch_idx * 1.5)
+                await asyncio.sleep(batch_idx * 0.5)
             prompt = self._build_batch_prompt(
                 batch_frames, transcript, start_s, end_s, duration_s
             )

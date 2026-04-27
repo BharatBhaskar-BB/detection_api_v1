@@ -438,12 +438,15 @@ async def _run_uploaded_video_pipeline(job_id: str, video_path: str, meta: dict[
         fps = info.get("fps", 30) or 30
         duration_s = info.get("duration_s", 0) or 0
 
+        t0 = time.time()
         all_frames = extract_frames(video_path, stride=settings.VIDEO_STRIDE)
         frame_count = len(all_frames)
 
         transcriber = Transcriber()
         transcript = transcriber.transcribe(video_path)
         has_audio = transcript.has_speech
+        t1 = time.time()
+        logger.info(f"[TIMING] job={job_id} extract+whisper: {t1-t0:.1f}s ({frame_count} frames, audio={has_audio})")
 
         await _set_job(job_id, progress=0.25, message=f"Extracted {frame_count} frames")
         await _emit_progress(job_id, started_at, "video_processing", 0.25, f"Extracted {frame_count} frames")
@@ -459,6 +462,8 @@ async def _run_uploaded_video_pipeline(job_id: str, video_path: str, meta: dict[
             stride=settings.VIDEO_STRIDE,
             duration_s=duration_s,
         )
+        t2 = time.time()
+        logger.info(f"[TIMING] job={job_id} frame_selection: {t2-t1:.1f}s ({len(selected_frames)} selected)")
 
         await _set_job(job_id, progress=0.55, message=f"Selected {len(selected_frames)} frames")
         await _emit_progress(job_id, started_at, "frame_selection", 0.55, f"Selected {len(selected_frames)} key frames")
@@ -472,6 +477,8 @@ async def _run_uploaded_video_pipeline(job_id: str, video_path: str, meta: dict[
             transcript=transcript,
             duration_s=duration_s,
         )
+        t3 = time.time()
+        logger.info(f"[TIMING] job={job_id} llm_inventory: {t3-t2:.1f}s ({len(inventory.items)} items)")
 
         await _set_job(job_id, progress=0.88, message="Generating report")
         await _emit_progress(job_id, started_at, "report", 0.88, "Generating report")
@@ -482,7 +489,12 @@ async def _run_uploaded_video_pipeline(job_id: str, video_path: str, meta: dict[
             duration_s,
             has_audio=has_audio,
         )
+        t4 = time.time()
+        logger.info(f"[TIMING] job={job_id} report_gen: {t4-t3:.1f}s")
+
         report = _materialize_report_images(job_id, report)
+        t5 = time.time()
+        logger.info(f"[TIMING] job={job_id} materialize: {t5-t4:.1f}s | TOTAL: {t5-t0:.1f}s")
 
         result_payload: dict[str, Any] = {
             "job_id": job_id,
