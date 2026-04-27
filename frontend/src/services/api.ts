@@ -34,7 +34,8 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (res.status === 401 || res.status === 403) {
     localStorage.removeItem("bb_token");
-    window.location.href = "/login";
+    const base = import.meta.env.BASE_URL.replace(/\/+$/, "");
+    window.location.href = `${base}/login`;
     throw new Error("Unauthorized");
   }
 

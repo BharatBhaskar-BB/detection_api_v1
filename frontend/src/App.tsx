@@ -15,6 +15,10 @@ import InventoryPage from "./pages/Inventory";
 import ScanDetailPage from "./pages/ScanDetail";
 import SettingsPage from "./pages/Settings";
 
+// Vite injects import.meta.env.BASE_URL from the `base` config (e.g. "/scanner/sc1/").
+// BrowserRouter needs it WITHOUT a trailing slash.
+const basename = import.meta.env.BASE_URL.replace(/\/+$/, "") || "/";
+
 export default function App() {
   const loadUser = useAuthStore((s) => s.loadUser);
   usePushSubscription();
@@ -24,7 +28,7 @@ export default function App() {
   }, [loadUser]);
 
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={basename}>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
 

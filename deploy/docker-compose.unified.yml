@@ -112,6 +112,8 @@ services:
   frontend:
     build:
       context: ../frontend
+      args:
+        VITE_BASE_PATH: /scanner/sc1
     restart: unless-stopped
     ports:
       - "3010:80"

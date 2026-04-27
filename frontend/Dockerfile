@@ -4,6 +4,9 @@
 # -- Build stage --
 FROM node:20-alpine AS build
 
+ARG VITE_BASE_PATH=""
+ENV VITE_BASE_PATH=${VITE_BASE_PATH}
+
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci
@@ -42,8 +45,8 @@ server {\n\
   ssl_protocols TLSv1.2 TLSv1.3;\n\
   root /usr/share/nginx/html;\n\
   index index.html;\n\
-  location /api/ {\n\
-    proxy_pass http://host.docker.internal:8000;\n\
+  location /api/detection/ {\n\
+    proxy_pass http://host.docker.internal:8100;\n\
     proxy_http_version 1.1;\n\
     proxy_set_header Upgrade $http_upgrade;\n\
     proxy_set_header Connection "upgrade";\n\
@@ -51,8 +54,8 @@ server {\n\
     proxy_read_timeout 600s;\n\
     proxy_send_timeout 600s;\n\
   }\n\
-  location /api/detection/ {\n\
-    proxy_pass http://host.docker.internal:8100;\n\
+  location /api/ {\n\
+    proxy_pass http://host.docker.internal:8000;\n\
     proxy_http_version 1.1;\n\
     proxy_set_header Upgrade $http_upgrade;\n\
     proxy_set_header Connection "upgrade";\n\
