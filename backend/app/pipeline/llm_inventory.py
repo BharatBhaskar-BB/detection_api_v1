@@ -557,7 +557,7 @@ class LLMInventoryDrafter:
                 logger.error(f"Failed to parse JSON: {text[:300]}")
                 return []
 
-        items_data = data.get("items", [])
+        items_data = data.get("items", []) if isinstance(data, dict) else data if isinstance(data, list) else []
         items = []
         for item in items_data:
             name = item.get("name", "").strip().lower()
