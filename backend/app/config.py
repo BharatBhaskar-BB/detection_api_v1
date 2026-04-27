@@ -88,7 +88,9 @@ class Settings(BaseSettings):
 
     # ── Gemini ───────────────────────────────────────────────
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-2.0-flash"
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_COMPARISON_MODELS: str = "gemini-2.5-flash-lite,gemini-2.5-pro"  # CSV of models to run in background
+    RESULTS_DIR: str = "/app/results"  # CSV comparison results directory
 
     # ── Pipeline Backend (separate service) ──────────────────
     PIPELINE_BACKEND_URL: str = "http://pipeline_backend:8100"

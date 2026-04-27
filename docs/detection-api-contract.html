@@ -1,0 +1,1077 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BundleBox Detection Pipeline API</title>
+    <style>
+      :root {
+        --bg: #ffffff;
+        --surface: #f9fafb;
+        --surface2: #f3f4f6;
+        --border: #e5e7eb;
+        --text: #111827;
+        --text-muted: #6b7280;
+        --accent: #dc2626;
+        --green: #16a34a;
+        --purple: #7c3aed;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.6;
+        padding: 2rem;
+        max-width: 1100px;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 2rem;
+        margin-bottom: 0.25rem;
+      }
+      h1 span.brand {
+        color: var(--accent);
+      }
+      .subtitle {
+        color: var(--text-muted);
+        margin-bottom: 2rem;
+      }
+      h2 {
+        font-size: 1.4rem;
+        margin: 2.5rem 0 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid var(--border);
+      }
+      h3 {
+        font-size: 1.1rem;
+        margin: 1.5rem 0 0.5rem;
+      }
+      p {
+        margin-bottom: 0.75rem;
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+
+      .badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        vertical-align: middle;
+      }
+      .badge-get {
+        background: var(--green);
+        color: #fff;
+      }
+      .badge-post {
+        background: var(--accent);
+        color: #fff;
+      }
+      .badge-ws {
+        background: var(--purple);
+        color: #fff;
+      }
+      .badge-no-auth {
+        background: var(--surface2);
+        color: var(--text-muted);
+        font-size: 0.65rem;
+      }
+      .badge-auth {
+        background: #fef2f2;
+        color: var(--accent);
+        font-size: 0.65rem;
+        border: 1px solid #fecaca;
+      }
+
+      .base-urls {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1rem 1.25rem;
+        margin-bottom: 1.5rem;
+      }
+      .base-urls code {
+        color: var(--accent);
+        background: #fef2f2;
+      }
+      .base-urls table {
+        width: 100%;
+      }
+      .base-urls td {
+        padding: 0.2rem 0;
+      }
+      .base-urls td:first-child {
+        color: var(--text-muted);
+        width: 120px;
+        font-size: 0.9rem;
+      }
+
+      .sequence {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1.5rem;
+        margin: 1.5rem 0;
+      }
+      .sequence ol {
+        padding-left: 1.5rem;
+      }
+      .sequence li {
+        margin-bottom: 0.75rem;
+      }
+      .seq-arrow {
+        color: var(--text-muted);
+        font-size: 0.85rem;
+      }
+
+      .endpoint {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        margin-bottom: 1.25rem;
+        overflow: hidden;
+      }
+      .endpoint-header {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.75rem 1rem;
+        background: var(--surface2);
+        border-bottom: 1px solid var(--border);
+        cursor: pointer;
+        user-select: none;
+      }
+      .endpoint-header:hover {
+        background: #e5e7eb;
+      }
+      .endpoint-header .path {
+        font-family: "SF Mono", "Fira Code", monospace;
+        font-size: 0.95rem;
+        font-weight: 600;
+        flex: 1;
+      }
+      .endpoint-header .desc {
+        color: var(--text-muted);
+        font-size: 0.85rem;
+      }
+      .endpoint-header .chevron {
+        color: var(--text-muted);
+        transition: transform 0.2s;
+      }
+      .endpoint.open .endpoint-header .chevron {
+        transform: rotate(90deg);
+      }
+      .endpoint-body {
+        display: none;
+        padding: 1rem 1.25rem;
+      }
+      .endpoint.open .endpoint-body {
+        display: block;
+      }
+
+      pre {
+        background: #faf5f5;
+        color: var(--text);
+        border: 1px solid #e8d5d5;
+        border-radius: 6px;
+        padding: 0.75rem 1rem;
+        overflow-x: auto;
+        font-family: "SF Mono", "Fira Code", monospace;
+        font-size: 0.85rem;
+        line-height: 1.5;
+        margin: 0.5rem 0 1rem;
+      }
+      code {
+        font-family: "SF Mono", "Fira Code", monospace;
+        font-size: 0.85em;
+        background: #f3f4f6;
+        padding: 1px 5px;
+        border-radius: 3px;
+        color: #111827;
+      }
+      pre code {
+        background: none;
+        padding: 0;
+      }
+
+      .field-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 0.5rem 0 1rem;
+        font-size: 0.9rem;
+      }
+      .field-table th {
+        text-align: left;
+        padding: 0.4rem 0.75rem;
+        border-bottom: 2px solid var(--border);
+        color: var(--text-muted);
+        font-weight: 600;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .field-table td {
+        padding: 0.4rem 0.75rem;
+        border-bottom: 1px solid var(--surface2);
+      }
+      .field-table td:first-child {
+        font-family: "SF Mono", "Fira Code", monospace;
+        font-size: 0.85rem;
+        color: #111827;
+        font-weight: 600;
+      }
+      .field-table .required {
+        color: var(--accent);
+        font-size: 0.75rem;
+        font-weight: 600;
+      }
+      .field-table .optional {
+        color: var(--text-muted);
+        font-size: 0.75rem;
+      }
+
+      .error-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 0.5rem 0;
+        font-size: 0.9rem;
+      }
+      .error-table th {
+        text-align: left;
+        padding: 0.4rem 0.75rem;
+        border-bottom: 2px solid var(--border);
+        color: var(--text-muted);
+        font-weight: 600;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+      }
+      .error-table td {
+        padding: 0.4rem 0.75rem;
+        border-bottom: 1px solid var(--surface2);
+      }
+      .error-table td:first-child {
+        font-family: monospace;
+        font-weight: 700;
+      }
+
+      .label {
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-muted);
+        font-weight: 600;
+        margin-bottom: 0.25rem;
+      }
+      .note {
+        background: #f0f9ff;
+        border-left: 3px solid #3b82f6;
+        padding: 0.5rem 0.75rem;
+        border-radius: 0 4px 4px 0;
+        margin: 0.5rem 0 1rem;
+        font-size: 0.9rem;
+      }
+      .warn {
+        background: #fef2f2;
+        border-left: 3px solid var(--accent);
+        padding: 0.5rem 0.75rem;
+        border-radius: 0 4px 4px 0;
+        margin: 0.5rem 0 1rem;
+        font-size: 0.9rem;
+      }
+      .toc {
+        margin: 1rem 0 2rem;
+      }
+      .toc ul {
+        list-style: none;
+        padding: 0;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+      }
+      .toc li a {
+        display: block;
+        padding: 0.4rem 0.75rem;
+        background: #fff;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        font-size: 0.85rem;
+        color: var(--text);
+      }
+      .toc li a:hover {
+        background: var(--surface2);
+        text-decoration: none;
+      }
+      footer {
+        margin-top: 3rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--border);
+        color: var(--text-muted);
+        font-size: 0.85rem;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <h1><span class="brand">Bundle</span>Box Detection Pipeline API</h1>
+    <p class="subtitle">
+      API contract for mobile app integration &bull; v1.0 &bull; April 2026
+    </p>
+
+    <nav class="toc">
+      <ul>
+        <li><a href="#overview">Overview</a></li>
+        <li><a href="#authentication">Authentication</a></li>
+        <li><a href="#sequence">Call Sequence</a></li>
+        <li><a href="#endpoints">Endpoints</a></li>
+        <li><a href="#websocket">WebSocket</a></li>
+        <li><a href="#errors">Error Codes</a></li>
+      </ul>
+    </nav>
+
+    <!-- ─── OVERVIEW ─── -->
+    <h2 id="overview">1. Overview</h2>
+    <p>
+      The Detection Pipeline API processes room-scan videos and returns a
+      structured inventory of detected items with evidence images. Videos are
+      processed asynchronously &mdash; submit a video, track progress via
+      WebSocket, and retrieve results when complete.
+    </p>
+
+    <div class="base-urls">
+      <table>
+        <tr>
+          <td>Base URL</td>
+          <td><code>https://dev.bundlebox.ai/api/detection/v1</code></td>
+        </tr>
+        <tr>
+          <td>WebSocket</td>
+          <td><code>wss://dev.bundlebox.ai/api/detection/v1</code></td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- ─── AUTHENTICATION ─── -->
+    <h2 id="authentication">2. Authentication</h2>
+    <p>
+      All endpoints (except <code>/health</code>) require a JWT token in the
+      <code>Authorization</code> header.
+    </p>
+
+    <pre><code>Authorization: Bearer &lt;jwt_token&gt;</code></pre>
+
+    <h3>JWT Token Format</h3>
+    <table class="field-table">
+      <thead>
+        <tr>
+          <th>Property</th>
+          <th>Value</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Algorithm</td>
+          <td>HS256</td>
+        </tr>
+        <tr>
+          <td>Secret</td>
+          <td>Shared <code>JWT_SECRET</code> (provided separately)</td>
+        </tr>
+        <tr>
+          <td>User ID claim</td>
+          <td><code>sub</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Expected JWT Payload</h3>
+    <pre><code>{
+  "sub": "60c80bb7-9331-4b27-9d7a-8706b17ff929",
+  "iat": 1776193468,
+  "exp": 1776194368
+}</code></pre>
+
+    <div class="note">
+      The <code>sub</code> claim is used as the user identifier for ownership
+      enforcement. Each job is bound to the user who created it &mdash; other
+      users cannot access it.
+    </div>
+
+    <h3>WebSocket Authentication</h3>
+    <p>
+      WebSocket connections pass the JWT as a query parameter (browsers don't
+      support custom headers on WebSocket):
+    </p>
+    <pre><code>wss://dev.bundlebox.ai/api/detection/v1/ws/{job_id}?token=&lt;jwt_token&gt;</code></pre>
+
+    <!-- ─── CALL SEQUENCE ─── -->
+    <h2 id="sequence">3. Call Sequence</h2>
+
+    <h3>Option A &mdash; One-shot (recommended for mobile)</h3>
+    <div class="sequence">
+      <ol>
+        <li>
+          <strong>Upload &amp; process</strong><br />
+          <code>POST /api/detection/v1/process-video</code> with video file<br />
+          <span class="seq-arrow">&darr; returns <code>job_id</code></span>
+        </li>
+        <li>
+          <strong>Listen for progress</strong><br />
+          <code>wss://.../api/detection/v1/ws/{job_id}?token=&lt;jwt&gt;</code
+          ><br />
+          <span class="seq-arrow"
+            >&darr; receive events until <code>type: "completed"</code></span
+          >
+        </li>
+        <li>
+          <strong>Get results</strong><br />
+          <code>GET /api/detection/v1/upload/{job_id}</code><br />
+          <code>GET /api/detection/v1/upload/{job_id}/images/{name}</code>
+        </li>
+      </ol>
+    </div>
+
+    <h3>Option B &mdash; Multi-step (chunked upload)</h3>
+    <div class="sequence">
+      <ol>
+        <li>
+          <code>POST /api/detection/v1/upload/init</code> &rarr; get
+          <code>job_id</code>
+        </li>
+        <li>
+          <code>POST /api/detection/v1/upload/{job_id}/file</code> &rarr; upload
+          video
+        </li>
+        <li>
+          <code>POST /api/detection/v1/upload/{job_id}/trigger</code> &rarr;
+          start processing
+        </li>
+        <li>
+          Connect WebSocket + poll results (same as Option A steps 2&ndash;3)
+        </li>
+      </ol>
+    </div>
+
+    <!-- ─── ENDPOINTS ─── -->
+    <h2 id="endpoints">4. Endpoints</h2>
+
+    <!-- health -->
+    <div class="endpoint open">
+      <div
+        class="endpoint-header"
+        onclick="this.parentElement.classList.toggle('open')"
+      >
+        <span class="badge badge-get">GET</span>
+        <span class="path">/api/detection/v1/health</span>
+        <span class="desc">Health check</span>
+        <span class="badge badge-no-auth">NO AUTH</span>
+        <span class="chevron">&#9654;</span>
+      </div>
+      <div class="endpoint-body">
+        <p class="label">Response 200</p>
+        <pre><code>{
+  "status": "ok",
+  "service": "pipeline_backend"
+}</code></pre>
+      </div>
+    </div>
+
+    <!-- process-video -->
+    <div class="endpoint open">
+      <div
+        class="endpoint-header"
+        onclick="this.parentElement.classList.toggle('open')"
+      >
+        <span class="badge badge-post">POST</span>
+        <span class="path">/api/detection/v1/process-video</span>
+        <span class="desc">One-shot: upload video + start processing</span>
+        <span class="badge badge-auth">AUTH</span>
+        <span class="chevron">&#9654;</span>
+      </div>
+      <div class="endpoint-body">
+        <div class="note">
+          Recommended for mobile &mdash; single call uploads the video and
+          queues processing.
+        </div>
+        <p class="label">Request &mdash; multipart/form-data</p>
+        <table class="field-table">
+          <thead>
+            <tr>
+              <th>Field</th>
+              <th>Type</th>
+              <th>Description</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>file</td>
+              <td>file</td>
+              <td>Video file (<code>video/*</code> content type)</td>
+              <td class="required">required*</td>
+            </tr>
+            <tr>
+              <td>gcs_url</td>
+              <td>string</td>
+              <td>
+                GCS URL (<code>gs://bucket/...</code>) &mdash; alternative to
+                file
+              </td>
+              <td class="optional">alternative*</td>
+            </tr>
+            <tr>
+              <td>scan_id</td>
+              <td>string</td>
+              <td>
+                Becomes the <code>job_id</code>. Use a unique ID per scan.
+              </td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>room_id</td>
+              <td>string</td>
+              <td>Room identifier</td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>room_name</td>
+              <td>string</td>
+              <td>Human-readable room name (e.g., "Living Room")</td>
+              <td class="optional">optional</td>
+            </tr>
+          </tbody>
+        </table>
+        <p style="font-size: 0.85rem; color: var(--text-muted)">
+          * Provide either <code>file</code> or <code>gcs_url</code>, not both.
+        </p>
+        <p class="label">Response 202</p>
+        <pre><code>{
+  "status": "accepted",
+  "job_id": "scan_123",
+  "websocket_url": "/api/detection/v1/ws/scan_123",
+  "result_url": "/api/detection/v1/upload/scan_123",
+  "scan_id": "scan_123",
+  "room_id": null,
+  "user_id": "60c80bb7-...",
+  "video_id": 1,
+  "room_name": null
+}</code></pre>
+        <p class="label">Errors</p>
+        <table class="error-table">
+          <tbody>
+            <tr>
+              <td>400</td>
+              <td>File must be a video / no input provided</td>
+            </tr>
+            <tr>
+              <td>401</td>
+              <td>Missing or invalid token</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- upload/init -->
+    <div class="endpoint">
+      <div
+        class="endpoint-header"
+        onclick="this.parentElement.classList.toggle('open')"
+      >
+        <span class="badge badge-post">POST</span>
+        <span class="path">/api/detection/v1/upload/init</span>
+        <span class="desc">Initialize job (multi-step flow)</span>
+        <span class="badge badge-auth">AUTH</span>
+        <span class="chevron">&#9654;</span>
+      </div>
+      <div class="endpoint-body">
+        <p class="label">Request &mdash; multipart/form-data</p>
+        <table class="field-table">
+          <thead>
+            <tr>
+              <th>Field</th>
+              <th>Type</th>
+              <th>Description</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>job_id</td>
+              <td>string</td>
+              <td>
+                Unique job identifier (1&ndash;128 chars,
+                <code>[A-Za-z0-9_-]</code>)
+              </td>
+              <td class="required">required</td>
+            </tr>
+            <tr>
+              <td>scan_id</td>
+              <td>string</td>
+              <td>Scan identifier</td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>room_id</td>
+              <td>string</td>
+              <td>Room identifier</td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>room_name</td>
+              <td>string</td>
+              <td>Human-readable room name</td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>video_id</td>
+              <td>string</td>
+              <td>Video identifier</td>
+              <td class="optional">optional</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="label">Response 202</p>
+        <pre><code>{
+  "status": "accepted",
+  "job_id": "job_789",
+  "websocket_url": "/api/detection/v1/ws/job_789",
+  "result_url": "/api/detection/v1/upload/job_789",
+  "upload_url": "/api/detection/v1/upload/job_789/file",
+  "trigger_url": "/api/detection/v1/upload/job_789/trigger",
+  "scan_id": null,
+  "room_id": null,
+  "user_id": "60c80bb7-...",
+  "video_id": null,
+  "room_name": null
+}</code></pre>
+      </div>
+    </div>
+
+    <!-- upload file -->
+    <div class="endpoint">
+      <div
+        class="endpoint-header"
+        onclick="this.parentElement.classList.toggle('open')"
+      >
+        <span class="badge badge-post">POST</span>
+        <span class="path">/api/detection/v1/upload/{job_id}/file</span>
+        <span class="desc">Upload video file to existing job</span>
+        <span class="badge badge-auth">AUTH</span>
+        <span class="chevron">&#9654;</span>
+      </div>
+      <div class="endpoint-body">
+        <p class="label">Request &mdash; multipart/form-data</p>
+        <table class="field-table">
+          <thead>
+            <tr>
+              <th>Field</th>
+              <th>Type</th>
+              <th>Description</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>file</td>
+              <td>file</td>
+              <td>Video file</td>
+              <td class="required">required*</td>
+            </tr>
+            <tr>
+              <td>gcs_url</td>
+              <td>string</td>
+              <td>GCS URL &mdash; alternative to file</td>
+              <td class="optional">alternative*</td>
+            </tr>
+            <tr>
+              <td>scan_id</td>
+              <td>string</td>
+              <td>Override scan identifier</td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>room_id</td>
+              <td>string</td>
+              <td>Override room identifier</td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>room_name</td>
+              <td>string</td>
+              <td>Override room name</td>
+              <td class="optional">optional</td>
+            </tr>
+            <tr>
+              <td>video_id</td>
+              <td>string</td>
+              <td>Override video identifier</td>
+              <td class="optional">optional</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="label">Response 201</p>
+        <pre><code>{
+  "status": "uploaded",
+  "job_id": "job_789",
+  "video_filename": "video.mp4",
+  "scan_id": null,
+  "room_id": null,
+  "user_id": "60c80bb7-...",
+  "video_id": null,
+  "room_name": null
+}</code></pre>
+        <p class="label">Errors</p>
+        <table class="error-table">
+          <tbody>
+            <tr>
+              <td>400</td>
+              <td>File must be a video</td>
+            </tr>
+            <tr>
+              <td>403</td>
+              <td>Forbidden &mdash; not your job</td>
+            </tr>
+            <tr>
+              <td>404</td>
+              <td>Job not found (call <code>/upload/init</code> first)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- trigger -->
+    <div class="endpoint">
+      <div
+        class="endpoint-header"
+        onclick="this.parentElement.classList.toggle('open')"
+      >
+        <span class="badge badge-post">POST</span>
+        <span class="path">/api/detection/v1/upload/{job_id}/trigger</span>
+        <span class="desc">Start processing uploaded file</span>
+        <span class="badge badge-auth">AUTH</span>
+        <span class="chevron">&#9654;</span>
+      </div>
+      <div class="endpoint-body">
+        <p class="label">Request</p>
+        <p>No body required. Auth header only.</p>
+        <p class="label">Response 202</p>
+        <pre><code>{
+  "status": "accepted",
+  "job_id": "job_789",
+  "websocket_url": "/api/detection/v1/ws/job_789",
+  "result_url": "/api/detection/v1/upload/job_789",
+  "scan_id": null,
+  "room_id": null,
+  "user_id": "60c80bb7-...",
+  "video_id": null,
+  "room_name": null
+}</code></pre>
+        <p class="label">Errors</p>
+        <table class="error-table">
+          <tbody>
+            <tr>
+              <td>400</td>
+              <td>No uploaded file for this job</td>
+            </tr>
+            <tr>
+              <td>403</td>
+              <td>Forbidden &mdash; not your job</td>
+            </tr>
+            <tr>
+              <td>404</td>
+              <td>Job not found</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- get result -->
+    <div class="endpoint open">
+      <div
+        class="endpoint-header"
+        onclick="this.parentElement.classList.toggle('open')"
+      >
+        <span class="badge badge-get">GET</span>
+        <span class="path">/api/detection/v1/upload/{job_id}</span>
+        <span class="desc">Get job status or final result</span>
+        <span class="badge badge-auth">AUTH</span>
+        <span class="chevron">&#9654;</span>
+      </div>
+      <div class="endpoint-body">
+        <p class="label">Response 200 &mdash; Processing</p>
+        <pre><code>{
+  "status": "processing",
+  "progress": 0.45,
+  "message": "Running detection..."
+}</code></pre>
+        <p class="label">Response 200 &mdash; Completed</p>
+        <pre><code>{
+  "status": "completed",
+  "progress": 1.0,
+  "message": "Done",
+  "result": {
+    "inventory": [
+      {
+        "item": "Sofa",
+        "quantity": 1,
+        "confidence": 0.95,
+        "evidence_image": "/api/detection/v1/upload/job_789/images/evidence_1.jpg"
+      }
+    ],
+    "report_image_urls": [
+      "/api/detection/v1/upload/job_789/images/report_page_1.jpg"
+    ]
+  }
+}</code></pre>
+        <p class="label">Errors</p>
+        <table class="error-table">
+          <tbody>
+            <tr>
+              <td>403</td>
+              <td>Forbidden &mdash; not your job</td>
+            </tr>
+            <tr>
+              <td>404</td>
+              <td>Job not found</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- get image -->
+    <div class="endpoint">
+      <div
+        class="endpoint-header"
+        onclick="this.parentElement.classList.toggle('open')"
+      >
+        <span class="badge badge-get">GET</span>
+        <span class="path"
+          >/api/detection/v1/upload/{job_id}/images/{image_name}</span
+        >
+        <span class="desc">Get evidence or report image</span>
+        <span class="badge badge-auth">AUTH</span>
+        <span class="chevron">&#9654;</span>
+      </div>
+      <div class="endpoint-body">
+        <p class="label">Path Parameters</p>
+        <table class="field-table">
+          <thead>
+            <tr>
+              <th>Param</th>
+              <th>Type</th>
+              <th>Description</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>job_id</td>
+              <td>string</td>
+              <td>Job identifier</td>
+              <td class="required">required</td>
+            </tr>
+            <tr>
+              <td>image_name</td>
+              <td>string</td>
+              <td>Filename (e.g., <code>evidence_1.jpg</code>)</td>
+              <td class="required">required</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="label">Response 200</p>
+        <p>Binary image (<code>image/jpeg</code>)</p>
+        <p class="label">Errors</p>
+        <table class="error-table">
+          <tbody>
+            <tr>
+              <td>400</td>
+              <td>Invalid image name (path traversal blocked)</td>
+            </tr>
+            <tr>
+              <td>403</td>
+              <td>Forbidden &mdash; not your job</td>
+            </tr>
+            <tr>
+              <td>404</td>
+              <td>Image not found</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- inventory -->
+    <div class="endpoint">
+      <div
+        class="endpoint-header"
+        onclick="this.parentElement.classList.toggle('open')"
+      >
+        <span class="badge badge-get">GET</span>
+        <span class="path">/api/detection/v1/inventory/{scan_id}</span>
+        <span class="desc">Get final inventory JSON</span>
+        <span class="badge badge-auth">AUTH</span>
+        <span class="chevron">&#9654;</span>
+      </div>
+      <div class="endpoint-body">
+        <div class="note">
+          Alternative to polling <code>/upload/{job_id}</code> &mdash; returns
+          the final result directly from stored files.
+        </div>
+        <p class="label">Response 200</p>
+        <pre><code>{
+  "inventory": [...],
+  "report_image_urls": [...],
+  "processing_time_s": 45.2,
+  "total_items": 23
+}</code></pre>
+        <p class="label">Errors</p>
+        <table class="error-table">
+          <tbody>
+            <tr>
+              <td>403</td>
+              <td>Forbidden &mdash; not your scan</td>
+            </tr>
+            <tr>
+              <td>404</td>
+              <td>Scan result not found</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ─── WEBSOCKET ─── -->
+    <h2 id="websocket">5. WebSocket</h2>
+
+    <div class="endpoint open">
+      <div
+        class="endpoint-header"
+        onclick="this.parentElement.classList.toggle('open')"
+      >
+        <span class="badge badge-ws">WSS</span>
+        <span class="path">/api/detection/v1/ws/{job_id}</span>
+        <span class="desc">Real-time processing progress</span>
+        <span class="badge badge-auth">AUTH</span>
+        <span class="chevron">&#9654;</span>
+      </div>
+      <div class="endpoint-body">
+        <p class="label">Connection</p>
+        <pre><code>wss://dev.bundlebox.ai/api/detection/v1/ws/{job_id}?token={jwt_token}</code></pre>
+
+        <p class="label">Server &rarr; Client Messages</p>
+        <pre><code>// Job initiated
+{ "type": "initiated",  "progress": 0.01, "message": "Process initiated" }
+
+// Progress updates (multiple)
+{ "type": "processing", "progress": 0.25, "message": "Extracting frames..." }
+{ "type": "processing", "progress": 0.50, "message": "Running detection..." }
+{ "type": "processing", "progress": 0.75, "message": "Generating report..." }
+
+// Completed &mdash; includes full result payload
+{ "type": "completed",  "progress": 1.0,  "message": "Done", "result": { ... } }
+
+// Error
+{ "type": "error", "message": "Processing failed: ..." }</code></pre>
+
+        <p class="label">Client &rarr; Server</p>
+        <table class="field-table">
+          <thead>
+            <tr>
+              <th>Message</th>
+              <th>Response</th>
+              <th>Purpose</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>"ping"</td>
+              <td><code>{"type": "pong"}</code></td>
+              <td>Keep connection alive (send every 30s)</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="label">Connection Lifecycle</p>
+        <ul style="margin: 0.5rem 0 0 1.25rem; font-size: 0.9rem">
+          <li>Connection closes with code <code>1008</code> if auth fails</li>
+          <li>Auto-reconnect recommended with 3 second delay</li>
+          <li>
+            Server sends <code>pong</code> in response to <code>ping</code> text
+            frames
+          </li>
+          <li>
+            Connection stays open until client disconnects or job completes
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- ─── ERRORS ─── -->
+    <h2 id="errors">6. Error Format &amp; Codes</h2>
+
+    <p>All error responses follow this format:</p>
+    <pre><code>{
+  "detail": "Human-readable error description"
+}</code></pre>
+
+    <table class="error-table" style="margin-top: 1rem">
+      <thead>
+        <tr>
+          <th>Code</th>
+          <th>Meaning</th>
+          <th>When</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>400</code></td>
+          <td>Bad Request</td>
+          <td>Invalid input, missing file, bad job_id format</td>
+        </tr>
+        <tr>
+          <td><code>401</code></td>
+          <td>Unauthorized</td>
+          <td>Missing or invalid JWT token</td>
+        </tr>
+        <tr>
+          <td><code>403</code></td>
+          <td>Forbidden</td>
+          <td>Valid token but not the owner of this job/scan</td>
+        </tr>
+        <tr>
+          <td><code>404</code></td>
+          <td>Not Found</td>
+          <td>Job, scan, or image doesn't exist</td>
+        </tr>
+        <tr>
+          <td><code>410</code></td>
+          <td>Gone</td>
+          <td>Deprecated endpoint (<code>/trigger</code>)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <footer>
+      <span class="brand">Bundle</span>Box Detection Pipeline API v1.0 &bull;
+      April 2026
+    </footer>
+  </body>
+</html>

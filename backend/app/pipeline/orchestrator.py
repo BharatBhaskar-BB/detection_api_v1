@@ -210,7 +210,7 @@ async def _run_pipeline(scan_id: str, room_name: str = "") -> None:
             llm_cost = _compute_llm_cost(tokens_in, tokens_out)
             db.add(PipelineCost(
                 scan_id=scan_id, step=f"ai_analysis{'_' + room_name if is_room else ''}", provider="gemini",
-                model=inventory.usage.get("model", "gemini-2.0-flash"),
+                model=inventory.usage.get("model", settings.GEMINI_MODEL),
                 tokens_in=tokens_in, tokens_out=tokens_out,
                 duration_s=time.time() - start_time, cost_usd=llm_cost,
                 extra_data={
@@ -380,6 +380,35 @@ async def _run_pipeline(scan_id: str, room_name: str = "") -> None:
                     f"Pipeline complete: scan={scan_id}, items={len(inventory.items)}, "
                     f"time={elapsed:.1f}s, cost=${total_cost:.4f}"
                 )
+
+                # ── Background: run comparison models ──
+                try:
+                    from app.pipeline.model_comparison import run_comparison_models
+                    primary_info = {
+                        "model": inventory.usage.get("model", settings.GEMINI_MODEL),
+                        "items_found": len(inventory.items),
+                        "total_pieces": sum(item.count for item in inventory.items),
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                        "cost_usd": llm_cost,
+                        "duration_s": elapsed,
+                        "item_names": ", ".join(sorted(set(item.name for item in inventory.items))),
+                        "items_json": json.dumps([
+                            {"name": item.name, "count": item.count, "room": item.room,
+                             "disposition": item.disposition, "size": item.size, "notes": item.notes}
+                            for item in inventory.items
+                        ]),
+                    }
+                    asyncio.create_task(run_comparison_models(
+                        scan_id=scan_id,
+                        selected_frames=selected_frames,
+                        transcript=transcript,
+                        duration_s=total_duration_s,
+                        primary_inventory=primary_info,
+                    ))
+                    logger.info(f"Background comparison task started for scan {scan_id}")
+                except Exception as comp_err:
+                    logger.warning(f"Failed to start comparison task: {comp_err}")
 
         except Exception as e:
             logger.exception(f"Pipeline failed: scan={scan_id}, room={room_name}")

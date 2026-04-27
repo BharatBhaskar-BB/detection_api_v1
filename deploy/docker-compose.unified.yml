@@ -75,6 +75,7 @@ services:
       - "8110:8100"
     volumes:
       - app-data:/app/data
+      - /home/bharat_bhaskar/results:/app/results
     depends_on:
       backend:
         condition: service_started

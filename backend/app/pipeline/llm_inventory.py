@@ -376,7 +376,7 @@ class LLMInventoryDrafter:
 
     # ── API Calls ──
 
-    async def _call_gemini(self, prompt: str, frames: list[SelectedFrame] | None = None, max_output_tokens: int = 16000) -> tuple[str, dict]:
+    async def _call_gemini(self, prompt: str, frames: list[SelectedFrame] | None = None, max_output_tokens: int = 16000, model_override: str | None = None) -> tuple[str, dict]:
         """Call Gemini with text + optional images. Returns (response_text, usage).
 
         Retries up to 4 times with exponential backoff on 429/RESOURCE_EXHAUSTED.
@@ -386,6 +386,7 @@ class LLMInventoryDrafter:
         from PIL import Image
 
         client = genai.Client(api_key=self.gemini_api_key)
+        model_name = model_override or self.gemini_model
 
         parts: list = [prompt]
         if frames:
@@ -397,7 +398,7 @@ class LLMInventoryDrafter:
 
         # For 2.5 models, constrain thinking budget to avoid consuming output tokens
         thinking_config = None
-        if "2.5" in self.gemini_model:
+        if "2.5" in model_name:
             thinking_config = types.ThinkingConfig(thinking_budget=1024)
 
         gen_config = types.GenerateContentConfig(
@@ -411,7 +412,7 @@ class LLMInventoryDrafter:
         for attempt in range(max_retries + 1):
             try:
                 response = await client.aio.models.generate_content(
-                    model=self.gemini_model,
+                    model=model_name,
                     contents=parts,
                     config=gen_config,
                 )
@@ -431,7 +432,7 @@ class LLMInventoryDrafter:
         usage = {
             "tokens_in": getattr(usage_meta, "prompt_token_count", 0) if usage_meta else 0,
             "tokens_out": getattr(usage_meta, "candidates_token_count", 0) if usage_meta else 0,
-            "model": self.gemini_model,
+            "model": model_name,
         }
         return text, usage
 
@@ -472,10 +473,10 @@ class LLMInventoryDrafter:
         }
         return text, usage
 
-    async def _call_llm(self, prompt: str, frames: list[SelectedFrame] | None = None, max_output_tokens: int = 16000) -> tuple[str, dict]:
+    async def _call_llm(self, prompt: str, frames: list[SelectedFrame] | None = None, max_output_tokens: int = 16000, model_override: str | None = None) -> tuple[str, dict]:
         """Route to the configured LLM provider."""
         if self._provider == "gemini":
-            return await self._call_gemini(prompt, frames, max_output_tokens=max_output_tokens)
+            return await self._call_gemini(prompt, frames, max_output_tokens=max_output_tokens, model_override=model_override)
         elif self._provider == "openai":
             return await self._call_openai(prompt, frames)
         else:
@@ -713,6 +714,89 @@ class LLMInventoryDrafter:
         result.usage = total_usage
         result.raw_responses = raw_responses
 
+        return result
+
+    async def draft_with_model(
+        self,
+        model_name: str,
+        selected_frames: list[SelectedFrame],
+        transcript: TranscriptionResult | None = None,
+        duration_s: float = 0,
+    ) -> DraftInventory:
+        """Run the same draft pipeline but with a specific model override.
+
+        Used for background comparison runs — same frames, different model.
+        """
+        result = DraftInventory()
+        if not selected_frames:
+            return result
+        if duration_s <= 0:
+            duration_s = selected_frames[-1].timestamp_s + 30
+
+        batch_size = self._batch_size
+        num_batches = max(1, math.ceil(len(selected_frames) / batch_size))
+        batch_duration = duration_s / num_batches
+
+        batches: list[tuple[list[SelectedFrame], float, float]] = []
+        for b in range(num_batches):
+            batch_start = b * batch_duration
+            batch_end = (b + 1) * batch_duration
+            batch_frames = [
+                f for f in selected_frames
+                if batch_start <= f.timestamp_s < batch_end
+            ]
+            if b == num_batches - 1:
+                batch_frames = [f for f in selected_frames if f.timestamp_s >= batch_start]
+            if batch_frames:
+                batches.append((batch_frames, batch_start, batch_end))
+
+        async def process_batch(batch_frames, start_s, end_s, batch_idx):
+            if batch_idx > 0:
+                await asyncio.sleep(batch_idx * 1.5)
+            prompt = self._build_batch_prompt(
+                batch_frames, transcript, start_s, end_s, duration_s
+            )
+            text, usage = await self._call_llm(prompt, batch_frames, model_override=model_name)
+            return text, usage
+
+        batch_tasks = [
+            process_batch(frames, start, end, i)
+            for i, (frames, start, end) in enumerate(batches)
+        ]
+        batch_results = await asyncio.gather(*batch_tasks)
+
+        total_usage = {"tokens_in": 0, "tokens_out": 0, "model": model_name}
+        raw_responses = []
+        for text, usage in batch_results:
+            total_usage["tokens_in"] += usage.get("tokens_in", 0)
+            total_usage["tokens_out"] += usage.get("tokens_out", 0)
+            raw_responses.append(text)
+
+        if len(batch_results) == 1:
+            all_items = self._parse_inventory_json(batch_results[0][0])
+        else:
+            has_transcript = transcript is not None and transcript.has_speech
+            merge_prompt = self._build_merge_prompt(raw_responses, has_transcript=has_transcript)
+            merge_text, merge_usage = await self._call_llm(
+                merge_prompt, max_output_tokens=32000, model_override=model_name
+            )
+            total_usage["tokens_in"] += merge_usage.get("tokens_in", 0)
+            total_usage["tokens_out"] += merge_usage.get("tokens_out", 0)
+            all_items = self._parse_inventory_json(merge_text)
+            if not all_items:
+                all_items = self._programmatic_merge(raw_responses, has_transcript)
+
+        has_transcript = transcript is not None and transcript.has_speech
+        if not has_transcript:
+            for item in all_items:
+                item.disposition = None
+                item.going = None
+
+        prompts = list(set(item.name for item in all_items if item.disposition != "staying"))
+        result.items = all_items
+        result.detection_prompts = prompts
+        result.usage = total_usage
+        result.raw_responses = raw_responses
         return result
 
     # ── Move Summary ──

@@ -41,7 +41,7 @@ if GEMINI_API_KEY:
 else:
     print("WARNING: No GEMINI_API_KEY found — /api/inventory will fail")
 
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 print(f"Gemini model: {GEMINI_MODEL}")
 
 # ── Model Loading ─────────────────────────────────────────────────────────────
