@@ -225,8 +225,7 @@ def _assign_frame_indices(
     """Assign each item a frame index based on the LLM's best_frame_ts.
 
     Uses the timestamp where the LLM reported seeing the item to find the
-    closest selected frame. When multiple items in the same room have the
-    same timestamp, spreads them to nearby frames to improve evidence diversity.
+    closest selected frame.
 
     Returns a list of frame indices (one per item).
     """
@@ -245,34 +244,6 @@ def _assign_frame_indices(
         else:
             best_idx = min(range(n_frames), key=lambda i: abs(frame_timestamps[i] - ts))
             assignments.append(best_idx)
-
-    # ── Spread items that share the same frame within a room ──
-    # When many items in the same room all map to one frame (often due to
-    # LLM assigning the same timestamp), spread them to adjacent frames
-    # that are within a reasonable time window of the original.
-    from collections import defaultdict
-    room_frame_items: dict[str, dict[int, list[int]]] = defaultdict(lambda: defaultdict(list))
-    for i, item in enumerate(items):
-        room = getattr(item, 'room', '') or ''
-        room_frame_items[room][assignments[i]].append(i)
-
-    for room, frame_groups in room_frame_items.items():
-        for fidx, item_indices in frame_groups.items():
-            if len(item_indices) <= 1:
-                continue
-            # Multiple items share this frame — spread to nearby frames
-            # Find frames within +/- 10s of the assigned frame
-            anchor_ts = frame_timestamps[fidx]
-            nearby = sorted(
-                [j for j in range(n_frames) if abs(frame_timestamps[j] - anchor_ts) <= 10.0],
-                key=lambda j: abs(frame_timestamps[j] - anchor_ts)
-            )
-            if len(nearby) <= 1:
-                continue
-            # Distribute items across nearby frames (round-robin)
-            for rank, item_i in enumerate(item_indices):
-                spread_idx = nearby[rank % len(nearby)]
-                assignments[item_i] = spread_idx
 
     return assignments
 

@@ -564,9 +564,9 @@ class LLMInventoryDrafter:
         if not frame_timestamps or not batch_time_ranges or not batch_texts:
             return
 
-        # Parse each batch → build lookup: (name, room) → (batch_idx, timestamp)
-        # Also build name-only lookup for room-renaming cases
-        batch_item_lookup: dict[tuple[str, str], tuple[int, float]] = {}
+        # Parse each batch → build lookup: (name, room) → list of (batch_idx, timestamp)
+        # Store ALL candidates per key (not just last) so we can pick the best batch.
+        batch_item_candidates: dict[tuple[str, str], list[tuple[int, float]]] = {}
         name_batch_lookup: dict[str, list[tuple[int, float]]] = {}
 
         for batch_idx, text in enumerate(batch_texts):
@@ -575,7 +575,9 @@ class LLMInventoryDrafter:
                 if item.best_frame_ts is None:
                     continue
                 key = (item.name.lower().strip(), (item.room or "").lower().strip())
-                batch_item_lookup[key] = (batch_idx, item.best_frame_ts)
+                batch_item_candidates.setdefault(key, []).append(
+                    (batch_idx, item.best_frame_ts)
+                )
                 name_batch_lookup.setdefault(
                     item.name.lower().strip(), []
                 ).append((batch_idx, item.best_frame_ts))
@@ -592,19 +594,40 @@ class LLMInventoryDrafter:
             """Find the closest real frame timestamp."""
             return min(frame_timestamps, key=lambda ft: abs(ft - ts))
 
+        def _pick_best_candidate(
+            candidates: list[tuple[int, float]],
+            merged_ts: float | None,
+        ) -> tuple[int, float] | None:
+            """Pick the candidate whose batch range best matches the merged timestamp."""
+            if not candidates:
+                return None
+            if len(candidates) == 1:
+                return candidates[0]
+            # Prefer candidate whose batch range contains the merged timestamp
+            if merged_ts is not None:
+                for cand_batch_idx, cand_ts in candidates:
+                    if _ts_in_batch_range(merged_ts, cand_batch_idx):
+                        return (cand_batch_idx, cand_ts)
+            # Fallback: pick the candidate whose batch timestamp is in its own batch range
+            for cand_batch_idx, cand_ts in candidates:
+                if _ts_in_batch_range(cand_ts, cand_batch_idx):
+                    return (cand_batch_idx, cand_ts)
+            # Last resort: pick the last candidate (latest batch)
+            return candidates[-1]
+
         n_fixed = 0
         n_snapped = 0
         for item in merged_items:
             # Look up which batch this item came from
             key = (item.name.lower().strip(), (item.room or "").lower().strip())
-            source = batch_item_lookup.get(key)
+            candidates = batch_item_candidates.get(key, [])
 
             # Fallback: name-only lookup
-            if source is None:
+            if not candidates:
                 name_key = item.name.lower().strip()
                 candidates = name_batch_lookup.get(name_key, [])
-                if candidates:
-                    source = candidates[0]
+
+            source = _pick_best_candidate(candidates, item.best_frame_ts)
 
             if source is None:
                 # Item not found in any batch — can't validate, keep as-is
