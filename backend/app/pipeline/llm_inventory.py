@@ -546,79 +546,115 @@ class LLMInventoryDrafter:
         merged_items: list[InventoryItem],
         batch_texts: list[str],
         frame_timestamps: list[float],
+        batch_time_ranges: list[tuple[float, float]] | None = None,
     ) -> None:
-        """Restore best_frame_ts from batch originals when merge corrupted them.
+        """Restore best_frame_ts using batch time ranges as ground truth.
 
-        The LLM merge sometimes invents fake timestamps. However, batch responses
-        can also have bad timestamps. Only replace the merge timestamp when:
-        - The merge timestamp is INVALID (not near any real frame), AND
-        - The batch timestamp IS valid (near a real frame).
+        The merge LLM frequently divides timestamps by ~100 (e.g., 40s → 0.4s).
+        These corrupted values often pass simple validation because they land
+        near frame 0 at 0.0s.
 
-        This conservative approach prevents replacing good merge timestamps
-        with bad batch timestamps.
+        Strategy: use deterministic batch time ranges to detect corruption.
+        Each item came from a specific batch with a known time range. If the
+        merged timestamp falls outside that batch's range, it's corrupted and
+        we restore the original batch timestamp.
 
         Mutates merged_items in place.
         """
-        if not frame_timestamps:
+        if not frame_timestamps or not batch_time_ranges or not batch_texts:
             return
 
-        min_ts = min(frame_timestamps)
-        max_ts = max(frame_timestamps)
+        # Parse each batch → build lookup: (name, room) → (batch_idx, timestamp)
+        # Also build name-only lookup for room-renaming cases
+        batch_item_lookup: dict[tuple[str, str], tuple[int, float]] = {}
+        name_batch_lookup: dict[str, list[tuple[int, float]]] = {}
 
-        def _is_valid_ts(ts):
-            """Check if a timestamp is plausibly real (within video range and near a frame)."""
-            if ts is None:
-                return False
-            if ts < min_ts - 1.0 or ts > max_ts + 1.0:
-                return False
-            closest = min(frame_timestamps, key=lambda ft: abs(ft - ts))
-            return abs(closest - ts) < 2.0
-
-        # Parse batch items to build lookup: (name, room) → best_frame_ts
-        # Only accept batch timestamps that are valid (near real frames)
-        batch_ts_lookup: dict[tuple[str, str], float] = {}
-        name_ts_lookup: dict[str, list[float]] = {}
-        for text in batch_texts:
+        for batch_idx, text in enumerate(batch_texts):
             batch_items = self._parse_inventory_json(text)
             for item in batch_items:
-                if item.best_frame_ts is not None and _is_valid_ts(item.best_frame_ts):
-                    key = (item.name, item.room)
-                    batch_ts_lookup[key] = item.best_frame_ts
-                    name_ts_lookup.setdefault(item.name, []).append(item.best_frame_ts)
+                if item.best_frame_ts is None:
+                    continue
+                key = (item.name.lower().strip(), (item.room or "").lower().strip())
+                batch_item_lookup[key] = (batch_idx, item.best_frame_ts)
+                name_batch_lookup.setdefault(
+                    item.name.lower().strip(), []
+                ).append((batch_idx, item.best_frame_ts))
+
+        def _ts_in_batch_range(ts: float, batch_idx: int) -> bool:
+            """Check if timestamp falls within the batch's time range (with tolerance)."""
+            if batch_idx >= len(batch_time_ranges):
+                return False
+            start, end = batch_time_ranges[batch_idx]
+            tolerance = 5.0  # seconds of slack
+            return (start - tolerance) <= ts <= (end + tolerance)
+
+        def _snap_to_nearest_frame(ts: float) -> float:
+            """Find the closest real frame timestamp."""
+            return min(frame_timestamps, key=lambda ft: abs(ft - ts))
 
         n_fixed = 0
+        n_snapped = 0
         for item in merged_items:
-            merge_valid = _is_valid_ts(item.best_frame_ts)
-            if merge_valid:
-                # Merge timestamp is already near a real frame — keep it
+            # Look up which batch this item came from
+            key = (item.name.lower().strip(), (item.room or "").lower().strip())
+            source = batch_item_lookup.get(key)
+
+            # Fallback: name-only lookup
+            if source is None:
+                name_key = item.name.lower().strip()
+                candidates = name_batch_lookup.get(name_key, [])
+                if candidates:
+                    source = candidates[0]
+
+            if source is None:
+                # Item not found in any batch — can't validate, keep as-is
                 continue
 
-            # Merge timestamp is invalid — try to restore from batch
-            key = (item.name, item.room)
-            if key in batch_ts_lookup:
-                batch_ts = batch_ts_lookup[key]
+            src_batch_idx, batch_ts = source
+
+            # Check: is the merged timestamp within the correct batch range?
+            if item.best_frame_ts is not None and _ts_in_batch_range(
+                item.best_frame_ts, src_batch_idx
+            ):
+                # Merged timestamp is in the right range — keep it
+                continue
+
+            # Merged timestamp is OUTSIDE the batch range — it's corrupted.
+            # Try the batch's original timestamp first.
+            if _ts_in_batch_range(batch_ts, src_batch_idx):
                 old_ts = item.best_frame_ts
-                item.best_frame_ts = batch_ts
+                item.best_frame_ts = _snap_to_nearest_frame(batch_ts)
                 n_fixed += 1
-                logger.debug(f"Restored ts for '{item.name}' [{item.room}]: "
-                             f"{old_ts} → {batch_ts}")
-                continue
-
-            # Try name-only match (room names may differ after merge renumbering)
-            if item.name in name_ts_lookup:
-                candidates = name_ts_lookup[item.name]
-                batch_ts = candidates[0]
+                logger.debug(
+                    f"Restored ts for '{item.name}' [{item.room}]: "
+                    f"{old_ts} → {item.best_frame_ts} "
+                    f"(batch {src_batch_idx+1} range "
+                    f"{batch_time_ranges[src_batch_idx][0]:.0f}-"
+                    f"{batch_time_ranges[src_batch_idx][1]:.0f}s)"
+                )
+            else:
+                # Both timestamps are bad — snap to batch midpoint
+                start, end = batch_time_ranges[src_batch_idx]
+                mid = (start + end) / 2.0
                 old_ts = item.best_frame_ts
-                item.best_frame_ts = batch_ts
-                n_fixed += 1
-                logger.debug(f"Restored ts (name-only) for '{item.name}' [{item.room}]: "
-                             f"{old_ts} → {batch_ts}")
-                continue
+                item.best_frame_ts = _snap_to_nearest_frame(mid)
+                n_snapped += 1
+                logger.debug(
+                    f"Snapped ts for '{item.name}' [{item.room}]: "
+                    f"{old_ts} → {item.best_frame_ts} (batch {src_batch_idx+1} midpoint)"
+                )
 
-        if n_fixed:
-            logger.info(f"Timestamp restoration: fixed {n_fixed}/{len(merged_items)} items")
+        total_fixed = n_fixed + n_snapped
+        if total_fixed:
+            logger.info(
+                f"Timestamp restoration: fixed {n_fixed}, snapped {n_snapped} "
+                f"/ {len(merged_items)} items"
+            )
         else:
-            logger.info(f"Timestamp restoration: all {len(merged_items)} items already valid")
+            logger.info(
+                f"Timestamp restoration: all {len(merged_items)} items "
+                f"within correct batch ranges"
+            )
 
     # ── Programmatic merge fallback ──
 
@@ -836,7 +872,10 @@ class LLMInventoryDrafter:
 
             # Restore timestamps that the merge LLM may have corrupted
             frame_ts = [f.timestamp_s for f in selected_frames]
-            self._restore_timestamps(all_items, raw_responses[:-1], frame_ts)
+            self._restore_timestamps(
+                all_items, raw_responses[:-1], frame_ts,
+                batch_time_ranges=batch_time_ranges,
+            )
 
         n_going = len([i for i in all_items if i.disposition == "going"])
         n_staying = len([i for i in all_items if i.disposition == "staying"])
