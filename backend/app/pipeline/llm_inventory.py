@@ -189,14 +189,25 @@ class LLMInventoryDrafter:
         batch_start_s: float,
         batch_end_s: float,
         total_duration_s: float,
+        batch_index: int = 0,
+        num_batches: int = 1,
     ) -> str:
         has_transcript = transcript is not None and transcript.has_speech
 
         prompt = (
             "You are a PROFESSIONAL MOVING ESTIMATOR reviewing a home video walkthrough.\n\n"
-            f"This batch covers {self._format_timestamp(batch_start_s)} - "
+            f"This is batch {batch_index + 1} of {num_batches}, covering "
+            f"{self._format_timestamp(batch_start_s)} - "
             f"{self._format_timestamp(batch_end_s)} of a "
-            f"{self._format_timestamp(total_duration_s)} video.\n\n"
+            f"{self._format_timestamp(total_duration_s)} video.\n"
+        )
+        if num_batches > 1:
+            prompt += (
+                f"Other batches cover different parts of the video and may show "
+                f"additional rooms you cannot see here.\n"
+            )
+        prompt += "\n"
+        prompt += (
             "TASK: List EVERY item in these frames — both items being MOVED and items\n"
             "that are STAYING. A complete estimate requires knowing ALL items.\n"
             "For each item provide:\n"
@@ -343,16 +354,46 @@ class LLMInventoryDrafter:
         )
         return prompt
 
-    def _build_merge_prompt(self, batch_results: list[str], has_transcript: bool = False) -> str:
+    def _build_merge_prompt(
+        self,
+        batch_results: list[str],
+        has_transcript: bool = False,
+        batch_time_ranges: list[tuple[float, float]] | None = None,
+    ) -> str:
         prompt = (
             "You are a moving estimator. Below are partial inventory lists from different "
-            "sections of the same home video walkthrough.\n\n"
+            "TIME SEGMENTS of the same home video walkthrough. The camera walks through "
+            "the home sequentially — each batch covers a different portion of the video.\n\n"
             "TASK: Merge them into ONE deduplicated, complete inventory.\n\n"
-            "RULES:\n"
-            "- If the same item appears in multiple batches from the same room, keep it ONCE "
-            "with the HIGHEST count.\n"
+        )
+
+        # ── CRITICAL: Room renumbering instructions ──
+        prompt += (
+            "CRITICAL — ROOM IDENTITY ACROSS BATCHES:\n"
+            "Each batch was processed INDEPENDENTLY. This means different batches may have\n"
+            "labeled DIFFERENT physical rooms with the SAME name (e.g., both call their\n"
+            "bedroom 'bedroom 1' because each batch only saw one bedroom).\n\n"
+            "To detect this, compare items across batches that share a room name:\n"
+            "- If 'bedroom 1' in batch 1 has a queen bed + nightstand (timestamps ~0-80s)\n"
+            "  and 'bedroom 1' in batch 2 has a twin bed + desk (timestamps ~80-160s),\n"
+            "  these are DIFFERENT rooms. Renumber: keep batch 1 as 'bedroom 1', rename\n"
+            "  batch 2 to 'bedroom 2'.\n"
+            "- Same logic applies to bathrooms, closets, and any room type that might\n"
+            "  appear multiple times in a home.\n"
+            "- Clues that rooms are DIFFERENT: completely different item sets, very different\n"
+            "  timestamps (items from separate time segments), different descriptions/notes.\n"
+            "- Clues that rooms are the SAME: overlapping items, similar timestamps, same\n"
+            "  distinguishing features in notes.\n"
+            "- When in doubt, treat them as DIFFERENT rooms (over-splitting is better\n"
+            "  than merging two real rooms into one).\n\n"
+        )
+
+        prompt += (
+            "MERGE RULES:\n"
+            "- If the same item appears in multiple batches from the SAME physical room,\n"
+            "  keep it ONCE with the HIGHEST count.\n"
             "- If the same item type appears in DIFFERENT rooms, keep separate entries "
-            "(e.g., 'nightstand' in 'master bedroom' AND 'nightstand' in 'guest bedroom').\n"
+            "(e.g., 'nightstand' in 'bedroom 1' AND 'nightstand' in 'bedroom 2').\n"
             "- Preserve room assignments and notes.\n"
         )
 
@@ -376,12 +417,15 @@ class LLMInventoryDrafter:
             "- Omit dimensions_approx from the merged output to save space.\n"
             "- PRESERVE best_frame_ts for every item — pick the best one if a merged\n"
             "  item appears in multiple batches. This field is CRITICAL.\n"
-            "- PRESERVE numbered room names exactly as-is (e.g., 'bedroom 1', 'bedroom 2').\n"
-            "  Do NOT merge items from different numbered rooms — they are DIFFERENT rooms.\n\n"
+            "- RENUMBER room names sequentially after merging (bedroom 1, bedroom 2, etc.).\n\n"
         )
 
         for i, result in enumerate(batch_results):
-            prompt += f"--- BATCH {i+1} ---\n{result}\n\n"
+            time_label = ""
+            if batch_time_ranges and i < len(batch_time_ranges):
+                s, e = batch_time_ranges[i]
+                time_label = f" (video {self._format_timestamp(s)} – {self._format_timestamp(e)})"
+            prompt += f"--- BATCH {i+1}{time_label} ---\n{result}\n\n"
 
         prompt += (f"Respond with ONLY valid JSON:\n"
                   f"{_MERGE_JSON_SCHEMA if has_transcript else _MERGE_JSON_SCHEMA_VISUAL}\n")
@@ -659,7 +703,8 @@ class LLMInventoryDrafter:
             if batch_idx > 0:
                 await asyncio.sleep(batch_idx * 0.5)
             prompt = self._build_batch_prompt(
-                batch_frames, transcript, start_s, end_s, duration_s
+                batch_frames, transcript, start_s, end_s, duration_s,
+                batch_index=batch_idx, num_batches=len(batches),
             )
             logger.info(f"Batch {batch_idx+1}/{len(batches)}: "
                         f"{len(batch_frames)} frames, "
@@ -689,7 +734,11 @@ class LLMInventoryDrafter:
         else:
             # Multiple batches — LLM merge (with higher token limit for large inventories)
             has_transcript = transcript is not None and transcript.has_speech
-            merge_prompt = self._build_merge_prompt(raw_responses, has_transcript=has_transcript)
+            batch_time_ranges = [(s, e) for (_, s, e) in batches]
+            merge_prompt = self._build_merge_prompt(
+                raw_responses, has_transcript=has_transcript,
+                batch_time_ranges=batch_time_ranges,
+            )
             merge_text, merge_usage = await self._call_llm(
                 merge_prompt, max_output_tokens=32000
             )
@@ -767,7 +816,8 @@ class LLMInventoryDrafter:
             if batch_idx > 0:
                 await asyncio.sleep(batch_idx * 0.5)
             prompt = self._build_batch_prompt(
-                batch_frames, transcript, start_s, end_s, duration_s
+                batch_frames, transcript, start_s, end_s, duration_s,
+                batch_index=batch_idx, num_batches=len(batches),
             )
             text, usage = await self._call_llm(prompt, batch_frames, model_override=model_name)
             return text, usage
@@ -789,7 +839,11 @@ class LLMInventoryDrafter:
             all_items = self._parse_inventory_json(batch_results[0][0])
         else:
             has_transcript = transcript is not None and transcript.has_speech
-            merge_prompt = self._build_merge_prompt(raw_responses, has_transcript=has_transcript)
+            batch_time_ranges = [(s, e) for (_, s, e) in batches]
+            merge_prompt = self._build_merge_prompt(
+                raw_responses, has_transcript=has_transcript,
+                batch_time_ranges=batch_time_ranges,
+            )
             merge_text, merge_usage = await self._call_llm(
                 merge_prompt, max_output_tokens=32000, model_override=model_name
             )
