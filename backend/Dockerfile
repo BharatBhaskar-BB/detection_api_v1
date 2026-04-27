@@ -7,8 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 ffmpeg git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install PyTorch with CUDA 12.4 support
-RUN pip install --no-cache-dir torch torchvision \
+# Install PyTorch with CUDA 12.4 support (pinned — host driver is CUDA 12.8)
+RUN pip install --no-cache-dir torch==2.4.0 torchvision==0.19.0 \
     --extra-index-url https://download.pytorch.org/whl/cu124
 
 # Install CLIP from GitHub (no PyPI release)
