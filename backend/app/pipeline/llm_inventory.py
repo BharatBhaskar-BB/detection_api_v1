@@ -202,13 +202,19 @@ class LLMInventoryDrafter:
             "For each item provide:\n"
             "- name: specific item name (lowercase)\n"
             "- count: how many you see\n"
-            "- room: which room it's in (e.g., 'living room', 'kitchen', 'master bedroom')\n"
+            "- room: which room it's in. NUMBER duplicate room types! If the home\n"
+            "  has two bedrooms, use 'bedroom 1', 'bedroom 2'. If two bathrooms,\n"
+            "  use 'bathroom 1', 'bathroom 2'. Distinguish by visual cues like\n"
+            "  decor, size, or contents (e.g., master bedroom with dark accent wall\n"
+            "  = 'bedroom 1', guest room with plaid bedding = 'bedroom 2').\n"
             "- disposition: ONLY set this if the homeowner EXPLICITLY states the item's fate\n"
             "  in the audio. Valid values: 'going', 'staying', 'scrap', 'haul', 'sell'.\n"
             "  If the item is NOT discussed in the audio, OMIT this field entirely.\n"
             "- size: 'small', 'medium', or 'large' relative to typical furniture\n"
             "- dimensions_approx: estimated dimensions in inches {length_in, width_in, height_in}\n"
-            "- best_frame_ts: the timestamp (seconds) of the frame where this item is MOST visible\n"
+            "- best_frame_ts: REQUIRED — the timestamp (seconds) of the frame where this\n"
+            "  item is MOST visible. Must match one of the provided frame timestamps.\n"
+            "  This field is CRITICAL for evidence images — do NOT omit it.\n"
             "- notes: any relevant details (color, size, brand, special handling)\n\n"
         )
 
@@ -287,7 +293,9 @@ class LLMInventoryDrafter:
                 "3. Count carefully: if you see 4 chairs across multiple frames in the same\n"
                 "   area, count=4. Do not double-count items seen from different angles.\n"
                 "4. Identify the room/area type from context (office, break room, living room,\n"
-                "   kitchen, bedroom, etc.).\n"
+                "   kitchen, bedroom, etc.). NUMBER duplicate room types! If there are\n"
+                "   two bedrooms, use 'bedroom 1', 'bedroom 2'. Distinguish by visual\n"
+                "   cues (decor, size, contents).\n"
                 "5. Do NOT return the example JSON — analyze the ACTUAL frames provided.\n"
                 "6. Do NOT include a 'going' field in your JSON output — without audio\n"
                 "   we cannot determine whether items are being moved or staying. The JSON\n"
@@ -295,7 +303,8 @@ class LLMInventoryDrafter:
                 "7. For each item, estimate its SIZE ('small', 'medium', 'large') and\n"
                 "   approximate DIMENSIONS in inches (length, width, height).\n"
                 "8. Set best_frame_ts to the timestamp (in seconds) of the frame where\n"
-                "   the item is MOST clearly visible.\n\n"
+                "   the item is MOST clearly visible. This is REQUIRED for every item\n"
+                "   and must match one of the provided frame timestamps.\n\n"
             )
 
         prompt += (
@@ -364,7 +373,11 @@ class LLMInventoryDrafter:
             "in the same room. When in doubt, KEEP the item.\n"
             "- Do NOT add items not mentioned in any batch.\n"
             "- Keep notes SHORT (under 10 words each) to stay within output limits.\n"
-            "- Omit dimensions_approx from the merged output to save space.\n\n"
+            "- Omit dimensions_approx from the merged output to save space.\n"
+            "- PRESERVE best_frame_ts for every item — pick the best one if a merged\n"
+            "  item appears in multiple batches. This field is CRITICAL.\n"
+            "- PRESERVE numbered room names exactly as-is (e.g., 'bedroom 1', 'bedroom 2').\n"
+            "  Do NOT merge items from different numbered rooms — they are DIFFERENT rooms.\n\n"
         )
 
         for i, result in enumerate(batch_results):

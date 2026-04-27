@@ -495,6 +495,9 @@ async def _run_uploaded_video_pipeline(job_id: str, video_path: str, meta: dict[
                     "room": item.room,
                     "confidence": item.confidence,
                     "disposition": item.disposition,
+                    "best_frame_ts": item.best_frame_ts,
+                    "size": item.size,
+                    "notes": item.notes,
                 }
                 for item in inventory.items
             ],

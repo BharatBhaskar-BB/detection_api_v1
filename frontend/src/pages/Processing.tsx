@@ -39,8 +39,7 @@ export default function ProcessingPage() {
 
   const [scan, setScan] = useState<Scan | null>(null);
   const [rooms, setRooms] = useState<Room[]>([]);
-  const isRoomByRoom =
-    scan?.scan_mode === "room_by_room" && rooms.length > 0;
+  const isRoomByRoom = scan?.scan_mode === "room_by_room" && rooms.length > 0;
 
   // All-at-once state
   const [progress, setProgress] = useState(0);
@@ -244,9 +243,7 @@ export default function ProcessingPage() {
           }
           addNotification({
             type: "scan_failed",
-            title: msg.room_name
-              ? `${msg.room_name} Failed`
-              : "Scan Failed",
+            title: msg.room_name ? `${msg.room_name} Failed` : "Scan Failed",
             message: msg.message,
             scanId: msg.scan_id,
           });
@@ -270,8 +267,7 @@ export default function ProcessingPage() {
   const totalRoomsTracked = rooms.length || 1;
   const overallProgress = isRoomByRoom
     ? Math.round(
-        roomEntries.reduce((sum, r) => sum + r.progress, 0) /
-          totalRoomsTracked,
+        roomEntries.reduce((sum, r) => sum + r.progress, 0) / totalRoomsTracked,
       )
     : Math.round(progress);
 
@@ -394,7 +390,9 @@ export default function ProcessingPage() {
                     <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden mb-2">
                       <div
                         className={`h-full rounded-full transition-all duration-500 ${
-                          isDone ? "bg-green-400" : "bg-gradient-to-r from-red-500 to-red-400"
+                          isDone
+                            ? "bg-green-400"
+                            : "bg-gradient-to-r from-red-500 to-red-400"
                         }`}
                         style={{ width: `${rp.progress}%` }}
                       />
@@ -423,9 +421,7 @@ export default function ProcessingPage() {
                     </div>
                   )}
                   {isFailed && rp.error && (
-                    <p className="text-[11px] text-red-600 mt-1">
-                      {rp.error}
-                    </p>
+                    <p className="text-[11px] text-red-600 mt-1">{rp.error}</p>
                   )}
                 </div>
               );
