@@ -60,6 +60,15 @@ export default function ProcessingPage() {
     if (!scanId) return;
     api.scans.get(scanId).then((s) => {
       setScan(s);
+      // If scan already completed or failed, redirect immediately
+      if (s.status === "completed") {
+        navigate(`/scans/${scanId}/inventory`, { replace: true });
+        return;
+      }
+      if (s.status === "failed") {
+        setError(s.progress_message || "Pipeline failed");
+        return;
+      }
       if (s.scan_mode === "room_by_room" && s.rooms.length > 0) {
         const sorted = [...s.rooms].sort((a, b) => a.order - b.order);
         setRooms(sorted);
@@ -90,7 +99,7 @@ export default function ProcessingPage() {
         setRoomProgress(init);
       }
     });
-  }, [scanId]);
+  }, [scanId, navigate]);
 
   const handleMessage = useCallback(
     (msg: WSMessage) => {
