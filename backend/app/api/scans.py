@@ -328,6 +328,9 @@ async def get_evidence_frame(scan_id: str, filename: str):
     safe = Path(filename).name
     image_path = settings.UPLOAD_DIR / "evidence" / scan_id / safe
     if not image_path.is_file():
+        # Fallback: pipeline stores evidence in pipeline_jobs/<scan_id>/evidence/
+        image_path = settings.UPLOAD_DIR / "pipeline_jobs" / scan_id / "evidence" / safe
+    if not image_path.is_file():
         raise HTTPException(status_code=404, detail="Evidence frame not found")
     return FileResponse(image_path, media_type="image/jpeg")
 
@@ -347,6 +350,13 @@ async def get_report(
     if not report_path.is_file():
         raise HTTPException(status_code=404, detail="Report not generated yet")
     data = json.loads(report_path.read_text(encoding="utf-8"))
+    # Rewrite pipeline evidence image URLs to backend-served paths
+    for item in data.get("items", []):
+        ei = item.get("evidence_image")
+        if ei and isinstance(ei, str) and ("/upload/" in ei or ei.startswith("/api/detection")):
+            # Extract filename from pipeline URL like /api/detection/v1/upload/<id>/images/item_1.jpg
+            fname = ei.rsplit("/", 1)[-1] if "/" in ei else ei
+            item["evidence_image"] = f"/api/v1/scans/{scan_id}/evidence/{fname}"
     return data
 
 

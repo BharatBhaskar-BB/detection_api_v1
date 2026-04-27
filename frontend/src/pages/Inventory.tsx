@@ -48,6 +48,12 @@ const DISPOSITION_OPTIONS: { value: string; label: string }[] = [
 
 type ViewMode = "internal" | "customer";
 
+/** Return a usable <img> src for evidence_image (may be base64 or a URL path). */
+function evidenceSrc(raw: string): string {
+  if (raw.startsWith("/") || raw.startsWith("http")) return raw;
+  return `data:image/jpeg;base64,${raw}`;
+}
+
 export default function InventoryPage() {
   const { id: scanId } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -460,13 +466,13 @@ export default function InventoryPage() {
                                   <button
                                     onClick={() =>
                                       setLightboxSrc(
-                                        `data:image/jpeg;base64,${item.evidence_image}`,
+                                        evidenceSrc(item.evidence_image),
                                       )
                                     }
                                     className="w-8 h-8 rounded-lg overflow-hidden flex-shrink-0 bg-gray-100"
                                   >
                                     <img
-                                      src={`data:image/jpeg;base64,${item.evidence_image}`}
+                                      src={evidenceSrc(item.evidence_image)}
                                       alt={item.name}
                                       className="w-full h-full object-cover"
                                     />
