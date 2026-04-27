@@ -191,7 +191,9 @@ export default function InventoryPage() {
   const roomNames = useMemo(() => Object.keys(roomData), [roomData]);
   const filteredRoomData = useMemo(() => {
     if (!filterRoom) return roomData;
-    return filterRoom in roomData ? { [filterRoom]: roomData[filterRoom] } : roomData;
+    return filterRoom in roomData
+      ? { [filterRoom]: roomData[filterRoom] }
+      : roomData;
   }, [roomData, filterRoom]);
 
   if (!scanId) return null;
@@ -466,13 +468,13 @@ export default function InventoryPage() {
                                   <button
                                     onClick={() =>
                                       setLightboxSrc(
-                                        evidenceSrc(item.evidence_image),
+                                        evidenceSrc(item.evidence_image!),
                                       )
                                     }
                                     className="w-8 h-8 rounded-lg overflow-hidden flex-shrink-0 bg-gray-100"
                                   >
                                     <img
-                                      src={evidenceSrc(item.evidence_image)}
+                                      src={evidenceSrc(item.evidence_image!)}
                                       alt={item.name}
                                       className="w-full h-full object-cover"
                                     />
