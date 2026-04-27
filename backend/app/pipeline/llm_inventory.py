@@ -539,6 +539,88 @@ class LLMInventoryDrafter:
         else:
             return "{\"items\": []}", {"tokens_in": 0, "tokens_out": 0, "model": "none"}
 
+    # ── Timestamp restoration after LLM merge ──
+
+    def _restore_timestamps(
+        self,
+        merged_items: list[InventoryItem],
+        batch_texts: list[str],
+        frame_timestamps: list[float],
+    ) -> None:
+        """Restore best_frame_ts from batch originals when the LLM merge corrupted them.
+
+        The LLM merge frequently invents fake timestamps instead of preserving
+        the originals from each batch.  This method:
+        1. Parses all batch responses to build a (name, room) → best_frame_ts lookup
+        2. Validates each merged item's timestamp against real frame timestamps
+        3. Replaces bad timestamps with the original batch value
+
+        Mutates merged_items in place.
+        """
+        if not frame_timestamps:
+            return
+
+        # Build set of valid frame timestamps (allow small tolerance for float comparison)
+        ts_set = set(frame_timestamps)
+        min_ts = min(frame_timestamps)
+        max_ts = max(frame_timestamps)
+
+        def _is_valid_ts(ts):
+            if ts is None:
+                return False
+            # Must be within video range
+            if ts < min_ts - 1.0 or ts > max_ts + 1.0:
+                return False
+            # Should be close to a real frame timestamp
+            closest = min(frame_timestamps, key=lambda ft: abs(ft - ts))
+            return abs(closest - ts) < 2.0  # within 2 seconds of a real frame
+
+        # Parse batch items to build lookup: (name, room) → best_frame_ts
+        batch_ts_lookup: dict[tuple[str, str], float] = {}
+        for text in batch_texts:
+            batch_items = self._parse_inventory_json(text)
+            for item in batch_items:
+                key = (item.name, item.room)
+                if item.best_frame_ts is not None and _is_valid_ts(item.best_frame_ts):
+                    batch_ts_lookup[key] = item.best_frame_ts
+
+        # Also build a name-only lookup for fuzzy matching (room names may change during merge)
+        name_ts_lookup: dict[str, list[float]] = {}
+        for text in batch_texts:
+            batch_items = self._parse_inventory_json(text)
+            for item in batch_items:
+                if item.best_frame_ts is not None and _is_valid_ts(item.best_frame_ts):
+                    name_ts_lookup.setdefault(item.name, []).append(item.best_frame_ts)
+
+        n_fixed = 0
+        for item in merged_items:
+            if _is_valid_ts(item.best_frame_ts):
+                continue  # already valid
+
+            # Try exact (name, room) match first
+            key = (item.name, item.room)
+            if key in batch_ts_lookup:
+                old_ts = item.best_frame_ts
+                item.best_frame_ts = batch_ts_lookup[key]
+                n_fixed += 1
+                logger.debug(f"Restored ts for '{item.name}' [{item.room}]: "
+                             f"{old_ts} → {item.best_frame_ts}")
+                continue
+
+            # Try name-only match (room may have been renumbered)
+            if item.name in name_ts_lookup:
+                candidates = name_ts_lookup[item.name]
+                # Pick the first available timestamp
+                old_ts = item.best_frame_ts
+                item.best_frame_ts = candidates[0]
+                n_fixed += 1
+                logger.debug(f"Restored ts (name-only) for '{item.name}' [{item.room}]: "
+                             f"{old_ts} → {item.best_frame_ts}")
+                continue
+
+        if n_fixed:
+            logger.info(f"Timestamp restoration: fixed {n_fixed}/{len(merged_items)} items")
+
     # ── Programmatic merge fallback ──
 
     def _programmatic_merge(
@@ -752,6 +834,10 @@ class LLMInventoryDrafter:
                 logger.warning("LLM merge returned no items — falling back to "
                                "programmatic batch combination")
                 all_items = self._programmatic_merge(raw_responses[:-1], has_transcript)
+
+            # Restore timestamps that the merge LLM may have corrupted
+            frame_ts = [f.timestamp_s for f in selected_frames]
+            self._restore_timestamps(all_items, raw_responses[:-1], frame_ts)
 
         n_going = len([i for i in all_items if i.disposition == "going"])
         n_staying = len([i for i in all_items if i.disposition == "staying"])
