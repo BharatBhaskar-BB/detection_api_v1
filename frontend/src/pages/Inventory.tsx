@@ -196,6 +196,50 @@ export default function InventoryPage() {
       : roomData;
   }, [roomData, filterRoom]);
 
+  const downloadCSV = useCallback(() => {
+    if (!report) return;
+    const rows: string[][] = [];
+    rows.push([
+      "Item #", "Room", "Item Name", "Count", "Size",
+      "Volume (cu ft)", "Weight (lbs)", "Total Volume", "Total Weight",
+      "Disposition", "Special Handling", "Notes",
+    ]);
+    report.items.forEach((item, i) => {
+      rows.push([
+        String(i + 1),
+        item.room || "",
+        item.name || "",
+        String(item.count || 1),
+        item.size || "",
+        String(item.volume_cuft || ""),
+        String(item.weight_lbs || ""),
+        String(item.total_volume_cuft || ""),
+        String(item.total_weight_lbs || ""),
+        item.disposition || "",
+        (item.special_handling || []).join("; "),
+        item.notes || "",
+      ]);
+    });
+    rows.push([]);
+    rows.push(["SUMMARY"]);
+    rows.push(["Total Item Types", String(report.summary.total_item_types || "")]);
+    rows.push(["Total Pieces", String(report.summary.total_items || "")]);
+    rows.push(["Total Volume (cu ft)", String(report.summary.total_volume_cuft || "")]);
+    rows.push(["Total Weight (lbs)", String(report.summary.total_weight_lbs || "")]);
+    rows.push(["Truck Recommendation", report.summary.truck_recommendation || ""]);
+
+    const csvContent = rows
+      .map((row) => row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(","))
+      .join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `inventory_report_${scanId}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }, [report, scanId]);
+
   if (!scanId) return null;
 
   if (loading) {
@@ -280,6 +324,13 @@ export default function InventoryPage() {
           className="w-8 h-8 flex items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 transition-colors print:hidden active:scale-95"
         >
           🖨️
+        </button>
+        <button
+          onClick={downloadCSV}
+          className="w-8 h-8 flex items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 transition-colors print:hidden active:scale-95"
+          title="Download CSV"
+        >
+          ⬇️
         </button>
         {editing ? (
           <button
