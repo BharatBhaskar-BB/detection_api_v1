@@ -199,19 +199,24 @@ def _extract_evidence_frame(
 ) -> Optional[str]:
     """Extract the best evidence frame for an item as base64 JPEG.
     
-    Uses best_frame_ts from LLM to find the closest frame.
+    Prefers best_frame_idx (direct index), falls back to best_frame_ts (nearest).
     Returns base64-encoded JPEG string, or None.
     """
     if not all_frames:
         return None
 
-    ts = item.best_frame_ts
-    if ts is None:
-        # Fallback: pick the middle frame (likely best overall view)
-        best_frame = all_frames[len(all_frames) // 2]
+    # Build lookup: frame_index → SelectedFrame
+    fidx_to_frame = {f.frame_index: f for f in all_frames}
+
+    # Prefer direct frame index
+    if item.best_frame_idx is not None and item.best_frame_idx in fidx_to_frame:
+        best_frame = fidx_to_frame[item.best_frame_idx]
+    elif item.best_frame_ts is not None:
+        # Fallback: find the frame closest to the target timestamp
+        best_frame = min(all_frames, key=lambda f: abs(f.timestamp_s - item.best_frame_ts))
     else:
-        # Find the frame closest to the target timestamp
-        best_frame = min(all_frames, key=lambda f: abs(f.timestamp_s - ts))
+        # Last resort: pick the middle frame
+        best_frame = all_frames[len(all_frames) // 2]
 
     # Encode as JPEG
     _, buf = cv2.imencode(".jpg", best_frame.frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -222,12 +227,15 @@ def _assign_frame_indices(
     items: list,
     all_frames: list[SelectedFrame],
 ) -> list[int]:
-    """Assign each item a frame index based on the LLM's best_frame_ts.
+    """Assign each item a frame index based on best_frame_idx or best_frame_ts.
 
-    Uses the timestamp where the LLM reported seeing the item to find the
-    closest selected frame.
+    Prefers the direct frame index (best_frame_idx) when available, falling
+    back to nearest-neighbor timestamp matching (best_frame_ts).
 
-    Returns a list of frame indices (one per item).
+    best_frame_idx is the SelectedFrame.frame_index value (index into all
+    stride-sampled frames). We map it to the position in all_frames[].
+
+    Returns a list of positional indices into all_frames (one per item).
     """
     if not all_frames:
         return [0] * len(items)
@@ -235,15 +243,21 @@ def _assign_frame_indices(
     n_frames = len(all_frames)
     frame_timestamps = [f.timestamp_s for f in all_frames]
 
+    # Build lookup: frame_index → position in all_frames[]
+    fidx_to_pos = {f.frame_index: pos for pos, f in enumerate(all_frames)}
+
     assignments: list[int] = []
     for item in items:
-        ts = item.best_frame_ts
-        if ts is None:
-            # No timestamp — pick the middle frame as a neutral fallback
-            assignments.append(n_frames // 2)
-        else:
-            best_idx = min(range(n_frames), key=lambda i: abs(frame_timestamps[i] - ts))
+        # Prefer direct frame index (integer, no conversion needed)
+        if item.best_frame_idx is not None and item.best_frame_idx in fidx_to_pos:
+            assignments.append(fidx_to_pos[item.best_frame_idx])
+        elif item.best_frame_ts is not None:
+            # Fallback to nearest-neighbor timestamp match
+            best_idx = min(range(n_frames), key=lambda i: abs(frame_timestamps[i] - item.best_frame_ts))
             assignments.append(best_idx)
+        else:
+            # No frame info — pick the middle frame as a neutral fallback
+            assignments.append(n_frames // 2)
 
     return assignments
 

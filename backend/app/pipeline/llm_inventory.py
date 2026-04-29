@@ -32,6 +32,7 @@ class InventoryItem:
     size: str = "medium"        # small, medium, large
     dimensions: Optional[dict] = None  # {"length_in": 48, "width_in": 36, "height_in": 30}
     best_frame_ts: Optional[float] = None  # timestamp (s) where item is best visible
+    best_frame_idx: Optional[int] = None  # direct index into selected_frames[]
     centroid: Optional[list[int]] = None  # Gemini centroid [y, x] on 0-1000 scale
     confidence: float = 0.9
     source: str = "llm_draft"
@@ -67,6 +68,7 @@ _INVENTORY_JSON_SCHEMA = """{
       "size": "medium",
       "dimensions_approx": {"length_in": 18, "width_in": 20, "height_in": 34},
       "best_frame_ts": 5.0,
+      "best_frame_idx": 3,
       "notes": "white wood chairs around round table"
     },
     {
@@ -77,6 +79,7 @@ _INVENTORY_JSON_SCHEMA = """{
       "size": "large",
       "dimensions_approx": {"length_in": 36, "width_in": 30, "height_in": 70},
       "best_frame_ts": 12.0,
+      "best_frame_idx": 7,
       "notes": "owner says fridge is staying"
     }
   ]
@@ -91,6 +94,7 @@ _INVENTORY_JSON_SCHEMA_VISUAL = """{
       "size": "medium",
       "dimensions_approx": {"length_in": 22, "width_in": 22, "height_in": 38},
       "best_frame_ts": 5.0,
+      "best_frame_idx": 3,
       "notes": "black rolling chairs around conference table"
     },
     {
@@ -100,6 +104,7 @@ _INVENTORY_JSON_SCHEMA_VISUAL = """{
       "size": "small",
       "dimensions_approx": {"length_in": 14, "width_in": 10, "height_in": 1},
       "best_frame_ts": 8.3,
+      "best_frame_idx": 5,
       "notes": "open on desk"
     }
   ]
@@ -226,6 +231,9 @@ class LLMInventoryDrafter:
             "- best_frame_ts: REQUIRED — the timestamp (seconds) of the frame where this\n"
             "  item is MOST visible. Must match one of the provided frame timestamps.\n"
             "  This field is CRITICAL for evidence images — do NOT omit it.\n"
+            "- best_frame_idx: REQUIRED — the frame NUMBER (integer) of the frame where\n"
+            "  this item is most visible. Must match one of the 'Frame N' labels above.\n"
+            "  This is the integer N from 'Frame N (at M:SS)'. This is CRITICAL.\n"
             "- notes: any relevant details (color, size, brand, special handling)\n\n"
         )
 
@@ -315,7 +323,9 @@ class LLMInventoryDrafter:
                 "   approximate DIMENSIONS in inches (length, width, height).\n"
                 "8. Set best_frame_ts to the timestamp (in seconds) of the frame where\n"
                 "   the item is MOST clearly visible. This is REQUIRED for every item\n"
-                "   and must match one of the provided frame timestamps.\n\n"
+                "   and must match one of the provided frame timestamps.\n"
+                "9. Set best_frame_idx to the frame NUMBER (integer N from 'Frame N') where\n"
+                "   the item is MOST clearly visible. This is REQUIRED for every item.\n\n"
             )
 
         prompt += (
@@ -449,7 +459,7 @@ class LLMInventoryDrafter:
         if frames:
             for sf in frames:
                 ts = self._format_timestamp(sf.timestamp_s)
-                parts.append(f"Frame at {ts}:")
+                parts.append(f"Frame {sf.frame_index} (at {ts}):")
                 frame_rgb = cv2.cvtColor(sf.frame, cv2.COLOR_BGR2RGB)
                 parts.append(Image.fromarray(frame_rgb))
 
@@ -508,7 +518,7 @@ class LLMInventoryDrafter:
             for sf in frames:
                 ts = self._format_timestamp(sf.timestamp_s)
                 b64 = self._frame_to_base64(sf.frame)
-                content.append({"type": "text", "text": f"Frame at {ts}:"})
+                content.append({"type": "text", "text": f"Frame {sf.frame_index} (at {ts}):"})
                 content.append({
                     "type": "image_url",
                     "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"},
@@ -721,6 +731,195 @@ class LLMInventoryDrafter:
                     f"{len(result)} merged items")
         return result
 
+    # ── Programmatic merge v2 — fuzzy name matching + frame_idx preservation ──
+
+    def _programmatic_merge_v2(
+        self,
+        batch_texts: list[str],
+        has_transcript: bool,
+        frame_timestamps: list[float] | None = None,
+        selected_frames: list[SelectedFrame] | None = None,
+    ) -> list[InventoryItem]:
+        """Merge batch results programmatically with fuzzy name matching.
+
+        Improvements over v1:
+        - Fuzzy name matching via SequenceMatcher (handles 'king bed' vs 'king size bed')
+        - Always preserves best_frame_idx from original batch (never trusts merge LLM)
+        - Snaps best_frame_ts to match frame_idx if available
+        - Logs detailed merge decisions for debugging
+        """
+        import re
+        from difflib import SequenceMatcher
+
+        # Parse all batches, tagging each item with its source batch
+        all_items: list[tuple[int, InventoryItem]] = []
+        for batch_idx, text in enumerate(batch_texts):
+            for item in self._parse_inventory_json(text):
+                all_items.append((batch_idx, item))
+
+        if not all_items:
+            return []
+
+        def _normalize_name(name: str) -> str:
+            """Normalize item name for comparison."""
+            name = name.lower().strip()
+            # Remove common size/color prefixes that don't change identity
+            name = re.sub(r'\b(small|medium|large|big|little)\b', '', name)
+            name = re.sub(r'\s+', ' ', name).strip()
+            return name
+
+        def _names_match(a: str, b: str, threshold: float = 0.82) -> bool:
+            """Check if two item names refer to the same item."""
+            na, nb = _normalize_name(a), _normalize_name(b)
+            if na == nb:
+                return True
+            # Token-set similarity (handles word reordering)
+            tokens_a, tokens_b = set(na.split()), set(nb.split())
+            if tokens_a and tokens_b:
+                jaccard = len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+                if jaccard >= 0.75:
+                    return True
+            return SequenceMatcher(None, na, nb).ratio() >= threshold
+
+        # Group by room, then fuzzy-dedup within each room
+        room_items: dict[str, list[tuple[int, InventoryItem]]] = {}
+        for batch_idx, item in all_items:
+            room = (item.room or "").lower().strip()
+            room_items.setdefault(room, []).append((batch_idx, item))
+
+        merged: list[InventoryItem] = []
+        merge_log: list[str] = []
+
+        for room, items_in_room in room_items.items():
+            # For each item in this room, try to match with existing merged items
+            room_merged: list[InventoryItem] = []
+
+            for batch_idx, item in items_in_room:
+                matched = False
+                for existing in room_merged:
+                    if _names_match(existing.name, item.name):
+                        # Duplicate — merge: keep higher count, better frame ref
+                        old_count = existing.count
+                        if item.count > existing.count:
+                            existing.count = item.count
+                        # Prefer the entry with a valid best_frame_idx
+                        if item.best_frame_idx is not None and existing.best_frame_idx is None:
+                            existing.best_frame_idx = item.best_frame_idx
+                            existing.best_frame_ts = item.best_frame_ts
+                        if item.disposition and not existing.disposition:
+                            existing.disposition = item.disposition
+                            existing.going = item.going
+                        if item.notes and item.notes not in (existing.notes or ""):
+                            existing.notes = (
+                                f"{existing.notes}; {item.notes}" if existing.notes
+                                else item.notes
+                            )
+                        merge_log.append(
+                            f"  DEDUP [{room}]: '{item.name}' (batch {batch_idx+1}, "
+                            f"count={item.count}) merged into '{existing.name}' "
+                            f"(count {old_count}→{existing.count})"
+                        )
+                        matched = True
+                        break
+
+                if not matched:
+                    room_merged.append(item)
+
+            merged.extend(room_merged)
+
+        # Snap best_frame_ts to match frame_idx using SelectedFrame.frame_index lookup
+        if selected_frames:
+            fidx_to_ts = {f.frame_index: f.timestamp_s for f in selected_frames}
+            for item in merged:
+                if item.best_frame_idx is not None and item.best_frame_idx in fidx_to_ts:
+                    item.best_frame_ts = fidx_to_ts[item.best_frame_idx]
+
+        n_input = len(all_items)
+        n_output = len(merged)
+        logger.info(f"Programmatic merge v2: {n_input} batch items → {n_output} merged items "
+                    f"({n_input - n_output} deduped)")
+        if merge_log:
+            for line in merge_log:
+                logger.debug(line)
+
+        return merged
+
+    # ── Merge comparison logging ──
+
+    def _compare_merge_results(
+        self,
+        llm_items: list[InventoryItem],
+        prog_items: list[InventoryItem],
+        frame_timestamps: list[float],
+    ) -> None:
+        """Log a detailed comparison of LLM merge vs programmatic merge results.
+
+        This runs during the A/B testing phase so we can decide which approach
+        to keep. Compares item counts, names, rooms, and frame assignments.
+        """
+        llm_set = {(i.name, i.room) for i in llm_items}
+        prog_set = {(i.name, i.room) for i in prog_items}
+
+        only_llm = llm_set - prog_set
+        only_prog = prog_set - llm_set
+        common = llm_set & prog_set
+
+        logger.info(
+            f"=== MERGE COMPARISON: LLM={len(llm_items)} items, "
+            f"PROG={len(prog_items)} items ==="
+        )
+        logger.info(
+            f"  Common: {len(common)}, Only in LLM: {len(only_llm)}, "
+            f"Only in PROG: {len(only_prog)}"
+        )
+
+        if only_llm:
+            logger.info(f"  Items ONLY in LLM merge: {sorted(only_llm)}")
+        if only_prog:
+            logger.info(f"  Items ONLY in PROG merge: {sorted(only_prog)}")
+
+        # Compare frame assignments for common items
+        llm_lookup = {(i.name, i.room): i for i in llm_items}
+        prog_lookup = {(i.name, i.room): i for i in prog_items}
+
+        frame_mismatches = []
+        for key in sorted(common):
+            li = llm_lookup[key]
+            pi = prog_lookup[key]
+
+            # Compare frame indices
+            llm_frame = li.best_frame_ts
+            prog_frame = pi.best_frame_idx
+            prog_ts = pi.best_frame_ts
+
+            if llm_frame is not None and prog_ts is not None:
+                if abs(llm_frame - prog_ts) > 5.0:  # >5s difference
+                    frame_mismatches.append(
+                        f"  '{key[0]}' [{key[1]}]: LLM ts={llm_frame:.1f}s, "
+                        f"PROG idx={prog_frame} ts={prog_ts:.1f}s"
+                    )
+
+        if frame_mismatches:
+            logger.info(f"  Frame assignment mismatches (>5s diff): {len(frame_mismatches)}")
+            for line in frame_mismatches:
+                logger.info(line)
+        else:
+            logger.info("  Frame assignments: all within 5s agreement")
+
+        # Count comparison
+        count_diffs = []
+        for key in sorted(common):
+            li = llm_lookup[key]
+            pi = prog_lookup[key]
+            if li.count != pi.count:
+                count_diffs.append(
+                    f"  '{key[0]}' [{key[1]}]: LLM count={li.count}, PROG count={pi.count}"
+                )
+        if count_diffs:
+            logger.info(f"  Count differences: {len(count_diffs)}")
+            for line in count_diffs:
+                logger.info(line)
+
     # ── Parsing ──
 
     def _parse_inventory_json(self, text: str) -> list[InventoryItem]:
@@ -781,6 +980,7 @@ class LLMInventoryDrafter:
                 size=(item.get("size") or "medium").strip().lower(),
                 dimensions=dims,
                 best_frame_ts=item.get("best_frame_ts"),
+                best_frame_idx=item.get("best_frame_idx"),
                 centroid=None,  # centroid is computed separately in report_generator
             ))
         return items
@@ -872,9 +1072,11 @@ class LLMInventoryDrafter:
             # Single batch — parse directly
             all_items = self._parse_inventory_json(batch_results[0][0])
         else:
-            # Multiple batches — LLM merge (with higher token limit for large inventories)
             has_transcript = transcript is not None and transcript.has_speech
             batch_time_ranges = [(s, e) for (_, s, e) in batches]
+            frame_ts = [f.timestamp_s for f in selected_frames]
+
+            # ── Approach A: LLM merge (existing) ──
             merge_prompt = self._build_merge_prompt(
                 raw_responses, has_transcript=has_transcript,
                 batch_time_ranges=batch_time_ranges,
@@ -885,20 +1087,31 @@ class LLMInventoryDrafter:
             total_usage["tokens_in"] += merge_usage.get("tokens_in", 0)
             total_usage["tokens_out"] += merge_usage.get("tokens_out", 0)
             raw_responses.append(f"--- MERGE ---\n{merge_text}")
-            all_items = self._parse_inventory_json(merge_text)
+            llm_items = self._parse_inventory_json(merge_text)
 
             # Fallback: if merge JSON was truncated/invalid, combine batch results
-            if not all_items:
+            if not llm_items:
                 logger.warning("LLM merge returned no items — falling back to "
                                "programmatic batch combination")
-                all_items = self._programmatic_merge(raw_responses[:-1], has_transcript)
+                llm_items = self._programmatic_merge(raw_responses[:-1], has_transcript)
 
             # Restore timestamps that the merge LLM may have corrupted
-            frame_ts = [f.timestamp_s for f in selected_frames]
             self._restore_timestamps(
-                all_items, raw_responses[:-1], frame_ts,
+                llm_items, raw_responses[:-1], frame_ts,
                 batch_time_ranges=batch_time_ranges,
             )
+
+            # ── Approach B: Programmatic merge v2 (new) ──
+            prog_items = self._programmatic_merge_v2(
+                raw_responses[:-1], has_transcript,
+                frame_timestamps=frame_ts, selected_frames=selected_frames,
+            )
+
+            # ── Compare and log both approaches ──
+            self._compare_merge_results(llm_items, prog_items, frame_ts)
+
+            # Use programmatic merge (preserves frame_idx from batch originals)
+            all_items = prog_items
 
         n_going = len([i for i in all_items if i.disposition == "going"])
         n_staying = len([i for i in all_items if i.disposition == "staying"])
@@ -987,6 +1200,7 @@ class LLMInventoryDrafter:
         else:
             has_transcript = transcript is not None and transcript.has_speech
             batch_time_ranges = [(s, e) for (_, s, e) in batches]
+            frame_ts = [f.timestamp_s for f in selected_frames]
             merge_prompt = self._build_merge_prompt(
                 raw_responses, has_transcript=has_transcript,
                 batch_time_ranges=batch_time_ranges,
@@ -996,9 +1210,20 @@ class LLMInventoryDrafter:
             )
             total_usage["tokens_in"] += merge_usage.get("tokens_in", 0)
             total_usage["tokens_out"] += merge_usage.get("tokens_out", 0)
-            all_items = self._parse_inventory_json(merge_text)
-            if not all_items:
-                all_items = self._programmatic_merge(raw_responses, has_transcript)
+            raw_responses.append(f"--- MERGE ---\n{merge_text}")
+            llm_items = self._parse_inventory_json(merge_text)
+            if not llm_items:
+                llm_items = self._programmatic_merge(raw_responses[:-1], has_transcript)
+            self._restore_timestamps(
+                llm_items, raw_responses[:-1], frame_ts,
+                batch_time_ranges=batch_time_ranges,
+            )
+            prog_items = self._programmatic_merge_v2(
+                raw_responses[:-1], has_transcript,
+                frame_timestamps=frame_ts, selected_frames=selected_frames,
+            )
+            self._compare_merge_results(llm_items, prog_items, frame_ts)
+            all_items = prog_items
 
         has_transcript = transcript is not None and transcript.has_speech
         if not has_transcript:
