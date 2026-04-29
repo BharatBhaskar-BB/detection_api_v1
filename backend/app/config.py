@@ -70,10 +70,10 @@ class Settings(BaseSettings):
     SCENE_MAX_SCENES: int = 8
 
     # ── V2: Smart Frame Selection ────────────────────────────
-    FRAME_SAMPLE_INTERVAL_S: int = 3        # dense sample every N seconds
-    FRAME_BLUR_THRESHOLD: float = 50.0      # Laplacian variance min (reject motion blur)
+    FRAME_SAMPLE_INTERVAL_S: int = 2        # dense sample every N seconds (was 3 — increase coverage per room)
+    FRAME_BLUR_THRESHOLD: float = 40.0      # Laplacian variance min (was 50 — be less strict to keep more room frames)
     FRAME_FACE_AREA_THRESHOLD: float = 0.25 # reject if face > 25% of frame
-    FRAME_EDGE_THRESHOLD: float = 10.0      # reject blank walls/ceilings
+    FRAME_EDGE_THRESHOLD: float = 8.0       # reject blank walls/ceilings (was 10 — slightly more lenient)
 
     # ── V2: Audio Transcription ──────────────────────────────
     WHISPER_MODEL: str = "medium"            # tiny/base/small/medium/large-v3

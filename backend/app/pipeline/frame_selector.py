@@ -95,7 +95,8 @@ class FrameSelector:
         return np.concatenate(embeddings, axis=0)
 
     def _mmr_select(self, embeddings: np.ndarray, budget: int,
-                    lambda_: float = 0.5) -> list[int]:
+                    lambda_: float = 0.5,
+                    temporal_anchor_frac: float = 0.25) -> list[int]:
         """
         Maximal Marginal Relevance selection for diversity.
         Returns indices into the embeddings array.
@@ -106,24 +107,48 @@ class FrameSelector:
         - Diversity: prefer frames different from already-selected ones
 
         With lambda_=0.5. Lower lambda_ = more diversity.
+
+        temporal_anchor_frac: fraction of budget reserved as temporal anchors
+        (evenly-spaced across the timeline) so that spatially-similar rooms
+        that appear at different times are never fully dropped by MMR.
         """
         n = len(embeddings)
         if n <= budget:
             return list(range(n))
 
+        # ── Temporal anchors: guarantee even coverage across the timeline ──
+        n_anchors = max(2, int(budget * temporal_anchor_frac))
+        anchor_indices = [
+            int(round(i * (n - 1) / (n_anchors - 1))) for i in range(n_anchors)
+        ]
+        # de-duplicate while preserving order
+        seen = set()
+        anchors = []
+        for a in anchor_indices:
+            if a not in seen:
+                anchors.append(a)
+                seen.add(a)
+
         # Similarity matrix
         sim_matrix = embeddings @ embeddings.T  # (N, N) cosine similarity
 
-        selected = []
-        remaining = set(range(n))
+        selected = list(anchors)
+        remaining = set(range(n)) - set(anchors)
+
+        # Fill remaining budget with MMR
+        mmr_budget = budget - len(selected)
 
         # Start with the frame most different from the average (most "unique")
-        avg_sim = sim_matrix.mean(axis=1)
-        first = int(np.argmin(avg_sim))
-        selected.append(first)
-        remaining.remove(first)
+        if not selected:
+            avg_sim = sim_matrix.mean(axis=1)
+            first = int(np.argmin(avg_sim))
+            selected.append(first)
+            remaining.discard(first)
+            mmr_budget -= 1
 
-        for _ in range(budget - 1):
+        for _ in range(mmr_budget):
+            if not remaining:
+                break
             best_idx = -1
             best_score = -float("inf")
 
@@ -224,7 +249,9 @@ class FrameSelector:
 
         # ── 3c. CLIP diversity selection ──
         duration_min = duration_s / 60
-        budget = max(50, min(90, int(duration_min * 5)))
+        # Scale budget generously: 8 frames/min, min 60, max 150
+        # Higher cap ensures multi-room walkthroughs don't lose entire rooms
+        budget = max(60, min(150, int(duration_min * 8)))
         logger.info(f"Frame budget: {budget} (video={duration_min:.1f}min)")
 
         if len(good_indices) <= budget:
