@@ -200,9 +200,18 @@ export default function InventoryPage() {
     if (!report) return;
     const rows: string[][] = [];
     rows.push([
-      "Item #", "Room", "Item Name", "Count", "Size",
-      "Volume (cu ft)", "Weight (lbs)", "Total Volume", "Total Weight",
-      "Disposition", "Special Handling", "Notes",
+      "Item #",
+      "Room",
+      "Item Name",
+      "Count",
+      "Size",
+      "Volume (cu ft)",
+      "Weight (lbs)",
+      "Total Volume",
+      "Total Weight",
+      "Disposition",
+      "Special Handling",
+      "Notes",
     ]);
     report.items.forEach((item, i) => {
       rows.push([
@@ -222,14 +231,28 @@ export default function InventoryPage() {
     });
     rows.push([]);
     rows.push(["SUMMARY"]);
-    rows.push(["Total Item Types", String(report.summary.total_item_types || "")]);
+    rows.push([
+      "Total Item Types",
+      String(report.summary.total_item_types || ""),
+    ]);
     rows.push(["Total Pieces", String(report.summary.total_items || "")]);
-    rows.push(["Total Volume (cu ft)", String(report.summary.total_volume_cuft || "")]);
-    rows.push(["Total Weight (lbs)", String(report.summary.total_weight_lbs || "")]);
-    rows.push(["Truck Recommendation", report.summary.truck_recommendation || ""]);
+    rows.push([
+      "Total Volume (cu ft)",
+      String(report.summary.total_volume_cuft || ""),
+    ]);
+    rows.push([
+      "Total Weight (lbs)",
+      String(report.summary.total_weight_lbs || ""),
+    ]);
+    rows.push([
+      "Truck Recommendation",
+      report.summary.truck_recommendation || "",
+    ]);
 
     const csvContent = rows
-      .map((row) => row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(","))
+      .map((row) =>
+        row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(","),
+      )
       .join("\n");
     const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);

@@ -844,6 +844,206 @@ class LLMInventoryDrafter:
 
         return merged
 
+    # ── Room disambiguation (text-only LLM call) ──
+
+    async def _disambiguate_rooms(
+        self,
+        batch_texts: list[str],
+        batch_time_ranges: list[tuple[float, float]],
+    ) -> tuple[list[str], dict]:
+        """Disambiguate room names across batches using a lightweight text-only LLM call.
+
+        Each batch independently names rooms, so the same room name in different
+        batches may refer to different physical rooms (e.g., two different bedrooms
+        both called "bedroom 1").  This method asks the LLM to identify such
+        collisions by comparing item sets across batches.
+
+        Returns (corrected_batch_texts, usage_dict).
+        On any failure, returns the original batch_texts unchanged with zero usage.
+        """
+        zero_usage = {"tokens_in": 0, "tokens_out": 0}
+        # Parse items per batch to build the summary
+        batch_items: list[list[InventoryItem]] = []
+        for text in batch_texts:
+            batch_items.append(self._parse_inventory_json(text))
+
+        # Collect all room names across batches, keyed by (room, batch_idx)
+        room_batches: dict[str, list[int]] = {}
+        for b_idx, items in enumerate(batch_items):
+            for item in items:
+                room = (item.room or "").strip().lower()
+                if room:
+                    room_batches.setdefault(room, [])
+                    if b_idx not in room_batches[room]:
+                        room_batches[room].append(b_idx)
+
+        # Only rooms appearing in 2+ batches need disambiguation
+        collision_rooms = {r for r, batches in room_batches.items() if len(batches) >= 2}
+        if not collision_rooms:
+            logger.info("Room disambiguation: no cross-batch room collisions — skipping")
+            return batch_texts, zero_usage
+
+        logger.info(f"Room disambiguation: {len(collision_rooms)} room(s) appear in multiple batches: "
+                    f"{sorted(collision_rooms)}")
+
+        # Build a compact text summary for the LLM
+        summary_parts = []
+        for b_idx, items in enumerate(batch_items):
+            if not items:
+                continue
+            s, e = batch_time_ranges[b_idx] if b_idx < len(batch_time_ranges) else (0, 0)
+            time_label = f"{self._format_timestamp(s)}–{self._format_timestamp(e)}"
+
+            # Group items by room
+            rooms_in_batch: dict[str, list[str]] = {}
+            for item in items:
+                room = (item.room or "unknown").strip().lower()
+                rooms_in_batch.setdefault(room, [])
+                label = item.name
+                if item.count > 1:
+                    label += f" ×{item.count}"
+                rooms_in_batch[room].append(label)
+
+            lines = [f"Batch {b_idx + 1} ({time_label}):"]
+            for room, item_names in sorted(rooms_in_batch.items()):
+                lines.append(f"  {room}: {', '.join(item_names)}")
+            summary_parts.append("\n".join(lines))
+
+        batch_summary = "\n\n".join(summary_parts)
+
+        # Collect all existing room names to avoid collisions when renaming
+        all_room_names = sorted(room_batches.keys())
+
+        prompt = (
+            "You are analyzing a walkthrough video of a home. The video was processed in "
+            f"{len(batch_items)} time-based batches. Each batch independently assigned room "
+            "names to items it detected.\n\n"
+            "The SAME room name in DIFFERENT batches might refer to DIFFERENT physical rooms "
+            "(each batch doesn't know what other batches named rooms).\n\n"
+            "Your task: Identify cases where the same room name across batches actually refers to "
+            "different physical rooms, and provide corrected room names.\n\n"
+            "RULES:\n"
+            "- If items OVERLAP significantly between batches (same bed type, same key furniture), "
+            "it's the SAME room — do NOT rename.\n"
+            "- If items are COMPLETELY DIFFERENT (queen bed vs bunk bed, different furniture), "
+            "it's likely DIFFERENT rooms — rename the later batch's room.\n"
+            "- Adjacent time batches with the same room name are MORE LIKELY the same room "
+            "(continuous walkthrough).\n"
+            "- When UNSURE, do NOT rename. Keeping rooms merged is safer than incorrect splitting.\n"
+            "- Only provide room corrections. Do not rename items.\n"
+            "- When renaming, ensure the new name doesn't collide with any existing room name "
+            f"in any batch. Existing rooms: {all_room_names}\n\n"
+            f"{batch_summary}\n\n"
+            "Respond with ONLY valid JSON:\n"
+            '{"corrections": [\n'
+            '  {"batch": <1-based batch number>, "original_room": "<current name>", '
+            '"new_room": "<corrected name>"},\n'
+            "  ...\n"
+            "]}\n"
+            "Return empty corrections [] if no rooms need renaming.\n"
+        )
+
+        try:
+            text, usage = await self._call_llm(prompt, max_output_tokens=2000)
+            logger.debug(f"Room disambiguation raw response: {text[:500]}")
+
+            data = json.loads(text)
+            corrections = data.get("corrections", [])
+
+            if not corrections:
+                logger.info("Room disambiguation: LLM found no rooms to rename")
+                return batch_texts, usage
+
+            # Validate and apply corrections
+            valid_corrections: list[dict] = []
+            for corr in corrections:
+                batch_num = corr.get("batch")
+                orig_room = (corr.get("original_room") or "").strip().lower()
+                new_room = (corr.get("new_room") or "").strip().lower()
+
+                if not isinstance(batch_num, int) or batch_num < 1 or batch_num > len(batch_texts):
+                    logger.warning(f"Room disambiguation: invalid batch number {batch_num}, skipping")
+                    continue
+                if not orig_room or not new_room or orig_room == new_room:
+                    continue
+
+                # Check that orig_room actually exists in that batch
+                b_idx = batch_num - 1
+                batch_rooms = {(item.room or "").strip().lower() for item in batch_items[b_idx]}
+                if orig_room not in batch_rooms:
+                    logger.warning(f"Room disambiguation: room '{orig_room}' not found in batch {batch_num}, skipping")
+                    continue
+
+                valid_corrections.append({
+                    "batch_idx": b_idx,
+                    "original_room": orig_room,
+                    "new_room": new_room,
+                })
+
+            if not valid_corrections:
+                logger.info("Room disambiguation: no valid corrections after validation")
+                return batch_texts, usage
+
+            # Apply corrections to the raw batch JSON texts
+            corrected_texts = list(batch_texts)
+            for corr in valid_corrections:
+                b_idx = corr["batch_idx"]
+                corrected_texts[b_idx] = self._apply_room_correction(
+                    corrected_texts[b_idx], corr["original_room"], corr["new_room"]
+                )
+                logger.info(
+                    f"Room disambiguation: batch {b_idx + 1}: "
+                    f"'{corr['original_room']}' → '{corr['new_room']}'"
+                )
+
+            return corrected_texts, usage
+
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.warning(f"Room disambiguation: failed to parse LLM response ({e}), "
+                           "using original room names")
+            return batch_texts, zero_usage
+        except Exception as e:
+            logger.warning(f"Room disambiguation: unexpected error ({e}), "
+                           "using original room names")
+            return batch_texts, zero_usage
+
+    @staticmethod
+    def _apply_room_correction(batch_json: str, old_room: str, new_room: str) -> str:
+        """Replace a room name in a batch JSON response string.
+
+        Operates on the parsed JSON to ensure only the 'room' fields are changed,
+        then re-serializes.
+        """
+        try:
+            data = json.loads(batch_json)
+        except json.JSONDecodeError:
+            # Try extracting from markdown code blocks
+            import re as _re
+            match = _re.search(r"```(?:json)?\s*(.*?)```", batch_json, _re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group(1))
+                except json.JSONDecodeError:
+                    return batch_json
+            else:
+                return batch_json
+
+        items_list = data.get("items", []) if isinstance(data, dict) else data if isinstance(data, list) else []
+        changed = 0
+        for item in items_list:
+            if isinstance(item, dict):
+                room_val = (item.get("room") or "").strip().lower()
+                if room_val == old_room:
+                    item["room"] = new_room
+                    changed += 1
+
+        if changed == 0:
+            return batch_json
+
+        if isinstance(data, dict):
+            data["items"] = items_list
+        return json.dumps(data, indent=2)
+
     # ── Merge comparison logging ──
 
     def _compare_merge_results(
@@ -1101,9 +1301,18 @@ class LLMInventoryDrafter:
                 batch_time_ranges=batch_time_ranges,
             )
 
-            # ── Approach B: Programmatic merge v2 (new) ──
+            # ── Approach B: Programmatic merge v2 with room disambiguation ──
+            # Step 1: Disambiguate room names across batches (text-only LLM call)
+            batch_only_responses = raw_responses[:-1]  # exclude merge response
+            disambiguated_responses, disambig_usage = await self._disambiguate_rooms(
+                batch_only_responses, batch_time_ranges,
+            )
+            total_usage["tokens_in"] += disambig_usage.get("tokens_in", 0)
+            total_usage["tokens_out"] += disambig_usage.get("tokens_out", 0)
+
+            # Step 2: Run programmatic merge on disambiguated batch texts
             prog_items = self._programmatic_merge_v2(
-                raw_responses[:-1], has_transcript,
+                disambiguated_responses, has_transcript,
                 frame_timestamps=frame_ts, selected_frames=selected_frames,
             )
 
@@ -1218,8 +1427,14 @@ class LLMInventoryDrafter:
                 llm_items, raw_responses[:-1], frame_ts,
                 batch_time_ranges=batch_time_ranges,
             )
+            # Disambiguate room names before programmatic merge
+            disambiguated_responses, disambig_usage = await self._disambiguate_rooms(
+                raw_responses[:-1], batch_time_ranges,
+            )
+            total_usage["tokens_in"] += disambig_usage.get("tokens_in", 0)
+            total_usage["tokens_out"] += disambig_usage.get("tokens_out", 0)
             prog_items = self._programmatic_merge_v2(
-                raw_responses[:-1], has_transcript,
+                disambiguated_responses, has_transcript,
                 frame_timestamps=frame_ts, selected_frames=selected_frames,
             )
             self._compare_merge_results(llm_items, prog_items, frame_ts)
